@@ -92,6 +92,8 @@ Long-lived connections (agent/bot WebSockets, SSE streams) bypass the per-reques
 
 | Document | Covers |
 |---|---|
+| [./getting-started.md](./getting-started.md) | The fastest path from a fresh clone to a running backend (Docker Compose or from source) |
+| [./architecture.md](./architecture.md) | How the control plane fits together — request flow, packages, data stores, the peer lifecycle, and how heartbeats land in the metric hypertables |
 | [./configuration.md](./configuration.md) | Every environment variable, defaults, and what each one affects |
 | [./deployment.md](./deployment.md) | Building and running the center (Docker Compose and from source), volumes, and operations |
 | [./database.md](./database.md) | TimescaleDB schema, hypertables, and the auto-migration system |
@@ -103,7 +105,7 @@ Long-lived connections (agent/bot WebSockets, SSE streams) bypass the per-reques
 
 ## Quickstart
 
-To build and run the center (Docker Compose, which also brings up TimescaleDB, or from source), see [./deployment.md](./deployment.md). At minimum you must set `DATABASE_URL` and `JWT_SECRET`; the full list of settings is in [./configuration.md](./configuration.md). The server listens on `:8080` by default and applies database migrations automatically on first start.
+For the fastest path from a fresh clone to a running backend, follow [./getting-started.md](./getting-started.md); for production and Docker details see [./deployment.md](./deployment.md). At minimum you must set `DATABASE_URL` and `JWT_SECRET`; the full list of settings is in [./configuration.md](./configuration.md). The server listens on `:8080` by default and applies database migrations automatically on first start.
 
 ## License
 

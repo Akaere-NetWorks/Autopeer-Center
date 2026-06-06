@@ -126,6 +126,8 @@ The server listens on `:8080` by default. Migrations run automatically on startu
 Start here:
 
 - [Documentation index](./docs/README.md)
+- [Getting started](./docs/getting-started.md) — from a fresh clone to a running backend
+- [Architecture](./docs/architecture.md) — how the control plane fits together
 - [Configuration reference](./docs/configuration.md) — every environment variable
 - [Deployment guide](./docs/deployment.md) — Docker Compose and production notes
 
