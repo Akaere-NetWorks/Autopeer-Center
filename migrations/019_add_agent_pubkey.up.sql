@@ -1,0 +1,1 @@
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS agent_pubkey TEXT DEFAULT '';

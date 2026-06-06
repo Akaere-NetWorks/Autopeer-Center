@@ -1,0 +1,1 @@
+ALTER TABLE nodes ADD COLUMN IF NOT EXISTS agent_state_changed_at TIMESTAMPTZ DEFAULT now();

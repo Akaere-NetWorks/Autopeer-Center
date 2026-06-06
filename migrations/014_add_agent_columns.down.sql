@@ -1,0 +1,2 @@
+ALTER TABLE nodes DROP COLUMN IF EXISTS agent_version;
+ALTER TABLE nodes DROP COLUMN IF EXISTS agent_state;

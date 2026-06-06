@@ -1,0 +1,1 @@
+ALTER TABLE peers ADD COLUMN bgp_proto_name TEXT NOT NULL DEFAULT '';

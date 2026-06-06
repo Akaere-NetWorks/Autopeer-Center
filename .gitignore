@@ -1,0 +1,23 @@
+# ── Secrets & local config ──────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Key material / persistent state ─────────────────────────────────────────
+center_keys.json
+*.key
+*.pem
+
+# ── Local DB / cache / releases ─────────────────────────────────────────────
+*.db
+cache.db
+/cache/
+/releases/
+
+# ── Compiled binaries / build output ────────────────────────────────────────
+/center
+*.exe
+/dist/
+
+# ── OS / editor ─────────────────────────────────────────────────────────────
+.DS_Store
