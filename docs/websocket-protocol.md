@@ -7,7 +7,7 @@ AutoPeer Center talks to two kinds of long-lived WebSocket clients:
 
 Both endpoints share a single `Hub` (`internal/ws/hub.go`) that tracks live connections — agents keyed by `node_id`, bots keyed by a generated connection ID.
 
-For the HTTP API that sits in front of these endpoints, see [`./api-reference.md`](./api-reference.md).
+For the HTTP API that sits in front of these endpoints, see [`./api/README.md`](./api/README.md).
 
 > The frontend that consumes these endpoints is not open-sourced; this document is the authoritative protocol reference.
 
@@ -261,4 +261,4 @@ Diagnostic targets must be public IP addresses; loopback, link-local, private (R
 | Read deadline | 90s (ping/pong every 30s) | 5s pre-auth, then 120s (ping/pong every 30s) |
 | Keyed by | `node_id` | generated connection ID |
 
-For HTTP endpoints, peer lifecycle, and configuration, see [`./api-reference.md`](./api-reference.md).
+For HTTP endpoints, peer lifecycle, and configuration, see [`./api/README.md`](./api/README.md).

@@ -5,6 +5,8 @@
 The compiled binary is `center`; the Go module is `github.com/akaere/autopeer-center`.
 
 > **The AutoPeer frontend is not open-source.** This repository is the AutoPeer *backend*. There is no companion web UI in this release — these documents are the complete and authoritative API reference. Any client (a custom dashboard, a script, the Telegram bot, or an MCP/AI assistant) integrates with the center purely through the HTTP and WebSocket APIs documented here.
+>
+> **Need a UI?** Hand the [**frontend design prompt**](./frontend-design-prompt.md) to an AI coding assistant — it interviews you about your hosting provider, recommends an SSR stack, and builds a complete, maintainable frontend against this API. No design work required on your part.
 
 ## What it does
 
@@ -16,7 +18,7 @@ autopeer-center is responsible for the full lifecycle of a DN42 peering:
 - **Telegram bot transport** — the bot connects over its own WebSocket (`/api/v1/bot/ws`), letting users manage peerings from chat. Users bind their account to a Telegram identity and configure per-channel notification preferences.
 - **TimescaleDB for relational *and* time-series data** — peers, nodes, users, sessions, settings, and audit logs live in regular tables; agent heartbeats land in TimescaleDB hypertables (e.g. `peer_metrics`, `node_metrics`) for time-series queries. Access is via the `pgx` pool plus a Bun ORM adapter (`internal/database/`, `internal/repository/`).
 - **Optional Redis / asynq** — when `REDIS_URL` is set, Redis provides a shared cache, distributed locks (for safe singleton jobs across replicas), and an [asynq](https://github.com/hibiken/asynq) job queue with an in-process scheduler. Without Redis the center degrades gracefully to a local bbolt cache, process-local locks, and in-process schedulers.
-- **AI assistant integration (MCP)** — Model Context Protocol endpoints (`/api/v1/mcp` and `/api/v1/admin/mcp`) expose peer operations to AI assistants, gated by dedicated MCP API keys with tool-approval and audit logging. See [./mcp.md](./mcp.md).
+- **AI assistant integration (MCP)** — Model Context Protocol endpoints (`/api/v1/mcp` and `/api/v1/admin/mcp`) expose peer operations to AI assistants, gated by dedicated MCP API keys with tool-approval and audit logging. See [./api/mcp.md](./api/mcp.md).
 
 The Go module targets Go 1.25.0. Database migrations in `migrations/*.up.sql` are applied automatically on startup (under a Postgres advisory lock, so multiple replicas can boot safely).
 
@@ -94,9 +96,10 @@ Long-lived connections (agent/bot WebSockets, SSE streams) bypass the per-reques
 | [./deployment.md](./deployment.md) | Building and running the center (Docker Compose and from source), volumes, and operations |
 | [./database.md](./database.md) | TimescaleDB schema, hypertables, and the auto-migration system |
 | [./authentication.md](./authentication.md) | JWT model, email-code / GPG / passkey / admin login, device flow, and route guards |
-| [./api-reference.md](./api-reference.md) | The full `/api/v1` HTTP API — public, user, and admin endpoints |
+| [./api/README.md](./api/README.md) | **Complete per-endpoint HTTP API reference** — request and response shapes for every public, user, and admin `/api/v1` endpoint, organized by resource (public, auth, peers, nodes, account, mcp, admin, admin-ops) |
+| [./api/versioning.md](./api/versioning.md) | The Stripe-style `Autopeer-Version` API versioning model and the dated version changes |
 | [./websocket-protocol.md](./websocket-protocol.md) | The encrypted agent/bot WebSocket handshake and message types |
-| [./mcp.md](./mcp.md) | Model Context Protocol endpoints, API keys, tool approval, and audit logging |
+| [./frontend-design-prompt.md](./frontend-design-prompt.md) | A ready-to-paste AI prompt that builds a complete SSR frontend against this API (asks your host → picks a stack → implements) |
 
 ## Quickstart
 

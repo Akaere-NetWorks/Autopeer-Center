@@ -11,7 +11,7 @@ The AutoPeer `center` exposes two parallel credential systems:
 
 This document describes how both work, the token model, the session model, and
 every supported login flow. For the request/response shape of individual
-endpoints, see [`./api-reference.md`](./api-reference.md).
+endpoints, see [`./api/README.md`](./api/README.md).
 
 ---
 
@@ -141,7 +141,7 @@ Authenticated users and admins can list and revoke their own sessions
 ("devices") — including a "log out everywhere else" action that revokes all
 sessions except the current one. Impersonation sessions cannot manage devices.
 Revoking a session takes effect immediately because every request re-checks
-session liveness. See [`./api-reference.md`](./api-reference.md) for the device
+session liveness. See [`./api/README.md`](./api/README.md) for the device
 endpoints.
 
 ---
@@ -311,7 +311,7 @@ validated against the allowed set at creation time.
 Keys are managed through the JWT-authenticated API (you cannot use an MCP key to
 mint another MCP key): users manage their own keys under `/api/v1/user/mcp-keys`,
 and admins manage admin keys (and may force-revoke user keys) under the admin
-routes. See [`./api-reference.md`](./api-reference.md) for the management and MCP
+routes. See [`./api/README.md`](./api/README.md) for the management and MCP
 transport endpoints.
 
 ---
@@ -341,5 +341,5 @@ header. Requests on the latest version take a zero-overhead fast path, and error
 bodies are never versioned. Only handlers that opt into versioned output are
 affected; everything else returns the same shape regardless of the header.
 
-See [`./api-reference.md`](./api-reference.md) for which resources are versioned
+See [`./api/README.md`](./api/README.md) for which resources are versioned
 and what changed between dated versions.

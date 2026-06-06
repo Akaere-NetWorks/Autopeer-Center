@@ -198,6 +198,12 @@ Sentry, Turnstile, WebAuthn, reconcile, token-TTL, and all other variables.
 - `internal/reconcile/` — periodic peer/state reconciliation worker
 - `migrations/` — numbered SQL migration files
 
+## API Documentation
+
+The full HTTP API reference lives in [`docs/api/`](docs/api/README.md): one file per resource area, documenting every endpoint's request (path/query/body) and response shapes, plus [`docs/api/versioning.md`](docs/api/versioning.md) for the `Autopeer-Version` header. These docs are written **directly from the handler code** and are the only API contract — the frontend is not part of this repository.
+
+**Keep them in sync with the code.** Whenever you add or remove an endpoint, or change its path, method, auth requirement, request struct, query/path params, response shape, status codes, or `ErrorJSON` codes, update the matching entry in `docs/api/*.md` and re-verify it against the handler in `internal/handler/`. See `docs/api/README.md` for which file owns each route.
+
 ## Contributing / Branch Workflow
 
 This repository uses a GitHub fork + feature-branch + Pull Request workflow:
@@ -223,3 +229,4 @@ This repository uses a GitHub fork + feature-branch + Pull Request workflow:
 - Never commit directly to `main`. All changes go through a feature branch + Pull Request.
 - Always run `go build ./...` before pushing.
 - Sync with `upstream/main` before starting new work.
+- If your change touches the HTTP API surface, update `docs/api/` in the same PR (see [API Documentation](#api-documentation)).
