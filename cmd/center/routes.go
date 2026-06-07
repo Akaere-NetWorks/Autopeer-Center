@@ -178,6 +178,8 @@ func setupRoutes(r chi.Router, deps *AppDeps) {
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireAdminWithSessions(cfg, deps.AuthRepo))
 			r.Get("/admin/peers", deps.AdminHandler.ListPeers)
+			r.Get("/admin/peers/export", deps.AdminHandler.ExportPeers)
+			r.Post("/admin/peers/import", deps.AdminHandler.ImportPeers)
 			r.Get("/admin/peers/{id}", deps.AdminHandler.GetPeer)
 			r.Get("/admin/peers/{id}/metrics", deps.AdminHandler.PeerMetrics)
 			r.Post("/admin/peers/{id}/approve", deps.AdminHandler.ApprovePeer)

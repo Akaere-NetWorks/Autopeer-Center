@@ -544,6 +544,143 @@ Each `peers` element:
 
 ---
 
+## `GET /api/v1/admin/peers/export`
+
+Export **all** peers as a JSON file for backup, bulk editing, or migration. The
+output round-trips back through `POST /api/v1/admin/peers/import`.
+
+- **Auth:** Bearer JWT (admin)
+- **Path parameters:** None.
+- **Query parameters:** None.
+- **Request body:** None.
+- **Response `200`:** A downloadable JSON document (`Content-Disposition:
+  attachment; filename="peers-export.json"`). Not subject to API versioning — the
+  dump schema is fixed.
+
+| Field | Type | Description |
+|---|---|---|
+| `version` | integer | Export schema version (currently `1`) |
+| `exported_at` | string | RFC3339 timestamp (UTC) |
+| `peers` | array | Peer entries (see below) |
+
+Each `peers` element:
+
+| Field | Type | Description |
+|---|---|---|
+| `node_id` | string | Node ID (import key) |
+| `node_name` | string (omitempty) | Node display name; export-only helper, ignored on import |
+| `remote_asn` | integer | Remote ASN (import key) |
+| `remote_pubkey` | string | Remote WireGuard public key |
+| `remote_endpoint` | string | Remote endpoint |
+| `remote_lla` | string | Remote link-local address |
+| `contact_email` | string | Contact email |
+| `wg_listen_port` | integer | WireGuard listen port |
+| `wg_interface_name` | string | WireGuard interface name |
+| `bgp_proto_name` | string | BIRD BGP protocol name |
+| `bird_config_filename` | string | BIRD config filename |
+| `wg_managed` | boolean | Agent-managed flag |
+| `mtu` | integer (nullable, omitempty) | Tunnel MTU |
+| `wg_preshared_key` | string (nullable, omitempty) | WireGuard pre-shared key |
+| `status` | string | Peer status |
+
+```json
+{
+  "version": 1,
+  "exported_at": "2026-06-07T12:00:00Z",
+  "peers": [
+    {
+      "node_id": "node-fra-01",
+      "node_name": "Frankfurt 01",
+      "remote_asn": 4242420000,
+      "remote_pubkey": "abcdEFGH1234ijklMNOP5678qrstUVWX9012yzAB=",
+      "remote_endpoint": "203.0.113.10:51820",
+      "remote_lla": "fe80::1",
+      "contact_email": "admin@example.com",
+      "wg_listen_port": 50000,
+      "wg_interface_name": "dn42_20000",
+      "bgp_proto_name": "dn42_20000",
+      "bird_config_filename": "dn42_20000.conf",
+      "wg_managed": true,
+      "mtu": 1420,
+      "status": "active"
+    }
+  ]
+}
+```
+
+- **Errors:**
+
+| Status | `error` code | Condition |
+|---|---|---|
+| 500 | `internal_error` | Failed to load peers or encode the export |
+
+- **Versioned:** No
+- **Source:** `AdminHandler.ExportPeers` — `internal/handler/admin_peer.go`
+
+---
+
+## `POST /api/v1/admin/peers/import`
+
+Import peers from a JSON dump produced by `GET /api/v1/admin/peers/export`.
+Writes DB rows **only** — it does not push config to agents. Peers are keyed on
+`(node_id, remote_asn)`. Invalid entries are reported in the response `errors`
+list rather than failing the whole import.
+
+- **Auth:** Bearer JWT (admin)
+- **Path parameters:** None.
+- **Query parameters:**
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `overwrite` | string | No | `true` updates an existing peer's fields; any other value skips existing peers (default) |
+
+- **Request body:** Either the export wrapper object (`{version, exported_at, peers}`)
+  or a bare JSON array of peer entries. `status` defaults to `pending` when empty.
+  `id`/timestamps in the input are ignored.
+- **Response `200`:**
+
+| Field | Type | Description |
+|---|---|---|
+| `status` | string | Always `"completed"` |
+| `imported` | integer | Newly inserted peers |
+| `overwritten` | integer | Existing peers updated (only when `overwrite=true`) |
+| `skipped` | integer | Existing peers left untouched (when `overwrite` is off) |
+| `total` | integer | Total entries in the input |
+| `errors` | array | Entries that could not be imported |
+
+Each `errors` element:
+
+| Field | Type | Description |
+|---|---|---|
+| `node_id` | string | Node ID from the entry |
+| `asn` | integer | Remote ASN from the entry |
+| `reason` | string | Why it failed (`missing node_id`, `invalid remote_asn`, `node not found`, `db error: ...`) |
+
+```json
+{
+  "status": "completed",
+  "imported": 3,
+  "overwritten": 0,
+  "skipped": 1,
+  "total": 5,
+  "errors": [
+    { "node_id": "bogus-node", "asn": 4242420001, "reason": "node not found" }
+  ]
+}
+```
+
+- **Errors:**
+
+| Status | `error` code | Condition |
+|---|---|---|
+| 400 | `invalid_request` | Failed to read request body |
+| 400 | `invalid_json` | Body is neither an export object nor a JSON array of peers |
+
+- **Versioned:** No
+- **Source:** `AdminHandler.ImportPeers` — `internal/handler/admin_peer.go`
+
+---
+
 ## `GET /api/v1/admin/peers/{id}`
 
 Fetch a single peer with full node details, latest metric summary, agent-sync state, and audit history.

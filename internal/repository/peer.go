@@ -19,6 +19,7 @@ type PeerRepository interface {
 	ListByNode(ctx context.Context, nodeID string) ([]*model.Peer, error)
 	ListActiveByNode(ctx context.Context, nodeID string) ([]*PeerContactResult, error)
 	List(ctx context.Context, params ListParams) ([]*AdminPeerListResult, int, error)
+	ListAll(ctx context.Context) ([]*model.Peer, error)
 	Create(ctx context.Context, p *model.Peer) error
 	UpdateStatus(ctx context.Context, id, status string, opts ...UpdateOption) error
 	UpdateFields(ctx context.Context, id string, fields map[string]interface{}) error
@@ -28,6 +29,7 @@ type PeerRepository interface {
 	ExistsByNodeAndPort(ctx context.Context, nodeID string, port int) (bool, error)
 	CountPendingByASN(ctx context.Context, asn int64) (int, error)
 	ImportPeer(ctx context.Context, p *model.Peer) (string, error)
+	ImportPeerFull(ctx context.Context, p *model.Peer, overwrite bool) (string, error)
 	SummaryByASN(ctx context.Context, asn int64) ([]*PeerSummaryResult, error)
 	ListActivePeersForEndpointCheck(ctx context.Context) ([]PeerEndpointCheck, error)
 	SetEndpointMismatchSince(ctx context.Context, peerID string, since *time.Time) error
@@ -307,6 +309,12 @@ func (r *bunPeerRepository) List(ctx context.Context, params ListParams) ([]*Adm
 	return results, total, err
 }
 
+func (r *bunPeerRepository) ListAll(ctx context.Context) ([]*model.Peer, error) {
+	peers := make([]*model.Peer, 0)
+	err := r.db.NewSelect().Model(&peers).Order("created_at ASC").Scan(ctx)
+	return peers, err
+}
+
 func (r *bunPeerRepository) Create(ctx context.Context, p *model.Peer) error {
 	_, err := r.db.NewInsert().Model(p).Returning("id").Exec(ctx)
 	return err
@@ -399,6 +407,74 @@ func (r *bunPeerRepository) ImportPeer(ctx context.Context, p *model.Peer) (stri
 		return "", err
 	}
 	return p.ID, nil
+}
+
+// ImportPeerFull inserts a peer from an external JSON dump, preserving all
+// columns including status, mtu and wg_preshared_key. It keys on the
+// (node_id, remote_asn) unique constraint. When overwrite is false an existing
+// peer is left untouched and "skipped" is returned. When overwrite is true an
+// existing peer's mutable columns are updated and "overwritten" is returned. A
+// freshly inserted row returns "imported". The peer's ID is populated on the
+// passed struct in all non-skipped cases.
+func (r *bunPeerRepository) ImportPeerFull(ctx context.Context, p *model.Peer, overwrite bool) (string, error) {
+	status := p.Status
+	if status == "" {
+		status = "pending"
+	}
+
+	if !overwrite {
+		err := r.db.NewRaw(`
+			INSERT INTO peers (node_id, remote_asn, remote_pubkey, remote_endpoint, remote_lla, contact_email,
+			                   wg_listen_port, wg_interface_name, bgp_proto_name, bird_config_filename, wg_managed,
+			                   mtu, wg_preshared_key, status, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now())
+			ON CONFLICT (node_id, remote_asn) DO NOTHING
+			RETURNING id`,
+			p.NodeID, p.RemoteASN, p.RemotePubkey, p.RemoteEndpoint, p.RemoteLLA, p.ContactEmail,
+			p.WgListenPort, p.WgInterfaceName, p.BgpProtoName, p.BirdConfigFilename, p.WgManaged,
+			p.MTU, p.WgPreSharedKey, status,
+		).Scan(ctx, &p.ID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return "skipped", nil
+			}
+			return "", err
+		}
+		return "imported", nil
+	}
+
+	var inserted bool
+	err := r.db.NewRaw(`
+		INSERT INTO peers (node_id, remote_asn, remote_pubkey, remote_endpoint, remote_lla, contact_email,
+		                   wg_listen_port, wg_interface_name, bgp_proto_name, bird_config_filename, wg_managed,
+		                   mtu, wg_preshared_key, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, now(), now())
+		ON CONFLICT (node_id, remote_asn) DO UPDATE SET
+			remote_pubkey = EXCLUDED.remote_pubkey,
+			remote_endpoint = EXCLUDED.remote_endpoint,
+			remote_lla = EXCLUDED.remote_lla,
+			contact_email = EXCLUDED.contact_email,
+			wg_listen_port = EXCLUDED.wg_listen_port,
+			wg_interface_name = EXCLUDED.wg_interface_name,
+			bgp_proto_name = EXCLUDED.bgp_proto_name,
+			bird_config_filename = EXCLUDED.bird_config_filename,
+			wg_managed = EXCLUDED.wg_managed,
+			mtu = EXCLUDED.mtu,
+			wg_preshared_key = EXCLUDED.wg_preshared_key,
+			status = EXCLUDED.status,
+			updated_at = now()
+		RETURNING id, (xmax = 0) AS inserted`,
+		p.NodeID, p.RemoteASN, p.RemotePubkey, p.RemoteEndpoint, p.RemoteLLA, p.ContactEmail,
+		p.WgListenPort, p.WgInterfaceName, p.BgpProtoName, p.BirdConfigFilename, p.WgManaged,
+		p.MTU, p.WgPreSharedKey, status,
+	).Scan(ctx, &p.ID, &inserted)
+	if err != nil {
+		return "", err
+	}
+	if inserted {
+		return "imported", nil
+	}
+	return "overwritten", nil
 }
 
 func (r *bunPeerRepository) SummaryByASN(ctx context.Context, asn int64) ([]*PeerSummaryResult, error) {

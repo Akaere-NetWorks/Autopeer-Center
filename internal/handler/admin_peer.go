@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -50,6 +51,44 @@ type peerImportEntry struct {
 
 type missingEmailInfo struct {
 	PeerID string `json:"peer_id"`
+	ASN    int64  `json:"asn"`
+	Reason string `json:"reason"`
+}
+
+// peerExportEntry is the portable JSON shape for a single peer used by the
+// admin export/import endpoints. NodeName is filled on export as a human
+// readable helper and ignored on import (peers are keyed on NodeID + RemoteASN).
+type peerExportEntry struct {
+	NodeID             string  `json:"node_id"`
+	NodeName           string  `json:"node_name,omitempty"`
+	RemoteASN          int64   `json:"remote_asn"`
+	RemotePubkey       string  `json:"remote_pubkey"`
+	RemoteEndpoint     string  `json:"remote_endpoint"`
+	RemoteLLA          string  `json:"remote_lla"`
+	ContactEmail       string  `json:"contact_email"`
+	WgListenPort       int     `json:"wg_listen_port"`
+	WgInterfaceName    string  `json:"wg_interface_name"`
+	BgpProtoName       string  `json:"bgp_proto_name"`
+	BirdConfigFilename string  `json:"bird_config_filename"`
+	WgManaged          bool    `json:"wg_managed"`
+	MTU                *int    `json:"mtu,omitempty"`
+	WgPreSharedKey     *string `json:"wg_preshared_key,omitempty"`
+	Status             string  `json:"status"`
+}
+
+// peerExportFile is the top-level wrapper produced by ExportPeers and accepted
+// by ImportPeers.
+type peerExportFile struct {
+	Version    int               `json:"version"`
+	ExportedAt string            `json:"exported_at"`
+	Peers      []peerExportEntry `json:"peers"`
+}
+
+const peerExportVersion = 1
+
+// peerImportError describes a single entry that could not be imported.
+type peerImportError struct {
+	NodeID string `json:"node_id"`
 	ASN    int64  `json:"asn"`
 	Reason string `json:"reason"`
 }
@@ -794,6 +833,194 @@ func (h *AdminHandler) ImportNodePeers(w http.ResponseWriter, r *http.Request) {
 		"db_errors":     dbErrors,
 		"total":         len(payload.Peers),
 		"missing_email": missingEmails,
+	})
+}
+
+// ExportPeers dumps all peers as a JSON file for backup/migration. The output
+// round-trips back through ImportPeers.
+func (h *AdminHandler) ExportPeers(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	adminEmail := middleware.GetEmail(ctx)
+
+	peers, err := h.peers.ListAll(ctx)
+	if err != nil {
+		ErrorJSON(w, r, http.StatusInternalServerError, "internal_error", "Failed to load peers")
+		return
+	}
+
+	nodeNames := make(map[string]string)
+	if nodes, err := h.nodes.List(ctx); err == nil {
+		for _, n := range nodes {
+			nodeNames[n.ID] = n.Name
+		}
+	}
+
+	entries := make([]peerExportEntry, 0, len(peers))
+	for _, p := range peers {
+		entries = append(entries, peerExportEntry{
+			NodeID:             p.NodeID,
+			NodeName:           nodeNames[p.NodeID],
+			RemoteASN:          p.RemoteASN,
+			RemotePubkey:       p.RemotePubkey,
+			RemoteEndpoint:     p.RemoteEndpoint,
+			RemoteLLA:          p.RemoteLLA,
+			ContactEmail:       p.ContactEmail,
+			WgListenPort:       p.WgListenPort,
+			WgInterfaceName:    p.WgInterfaceName,
+			BgpProtoName:       p.BgpProtoName,
+			BirdConfigFilename: p.BirdConfigFilename,
+			WgManaged:          p.WgManaged,
+			MTU:                p.MTU,
+			WgPreSharedKey:     p.WgPreSharedKey,
+			Status:             p.Status,
+		})
+	}
+
+	file := peerExportFile{
+		Version:    peerExportVersion,
+		ExportedAt: time.Now().UTC().Format(time.RFC3339),
+		Peers:      entries,
+	}
+
+	data, err := json.MarshalIndent(file, "", "  ")
+	if err != nil {
+		ErrorJSON(w, r, http.StatusInternalServerError, "internal_error", "Failed to encode export")
+		return
+	}
+
+	h.auditSvc.Log(ctx, "peer.export", adminEmail, nil, map[string]interface{}{
+		"count": len(entries),
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Disposition", `attachment; filename="peers-export.json"`)
+	w.Write(data)
+}
+
+// ImportPeers inserts (or, when overwrite=true, upserts) peers from a JSON dump
+// produced by ExportPeers. It writes DB rows only; it does not push config to
+// agents. Invalid entries (missing node_id, bad ASN, unknown node) are reported
+// in the response errors list rather than failing the whole import.
+func (h *AdminHandler) ImportPeers(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	adminEmail := middleware.GetEmail(ctx)
+	overwrite := r.URL.Query().Get("overwrite") == "true"
+
+	body, err := io.ReadAll(r.Body)
+	r.Body.Close()
+	if err != nil {
+		ErrorJSON(w, r, http.StatusBadRequest, "invalid_request", "Failed to read request body")
+		return
+	}
+
+	var entries []peerExportEntry
+	var file peerExportFile
+	if err := json.Unmarshal(body, &file); err == nil && file.Peers != nil {
+		entries = file.Peers
+	} else if err := json.Unmarshal(body, &entries); err != nil {
+		ErrorJSON(w, r, http.StatusBadRequest, "invalid_json", "Body must be a peer export object or a JSON array of peers")
+		return
+	}
+
+	imported := 0
+	overwritten := 0
+	skipped := 0
+	importErrors := make([]peerImportError, 0)
+	nodeExists := make(map[string]bool)
+
+	for _, e := range entries {
+		if e.NodeID == "" {
+			importErrors = append(importErrors, peerImportError{ASN: e.RemoteASN, Reason: "missing node_id"})
+			continue
+		}
+		if e.RemoteASN <= 0 {
+			importErrors = append(importErrors, peerImportError{NodeID: e.NodeID, ASN: e.RemoteASN, Reason: "invalid remote_asn"})
+			continue
+		}
+
+		ok, checked := nodeExists[e.NodeID]
+		if !checked {
+			if _, err := h.nodes.GetByID(ctx, e.NodeID); err != nil {
+				ok = false
+			} else {
+				ok = true
+			}
+			nodeExists[e.NodeID] = ok
+		}
+		if !ok {
+			importErrors = append(importErrors, peerImportError{NodeID: e.NodeID, ASN: e.RemoteASN, Reason: "node not found"})
+			continue
+		}
+
+		peer := &model.Peer{
+			NodeID:             e.NodeID,
+			RemoteASN:          e.RemoteASN,
+			RemotePubkey:       e.RemotePubkey,
+			RemoteEndpoint:     e.RemoteEndpoint,
+			RemoteLLA:          e.RemoteLLA,
+			ContactEmail:       e.ContactEmail,
+			WgListenPort:       e.WgListenPort,
+			WgInterfaceName:    e.WgInterfaceName,
+			BgpProtoName:       e.BgpProtoName,
+			BirdConfigFilename: e.BirdConfigFilename,
+			WgManaged:          e.WgManaged,
+			MTU:                e.MTU,
+			WgPreSharedKey:     e.WgPreSharedKey,
+			Status:             e.Status,
+		}
+
+		action, err := h.peers.ImportPeerFull(ctx, peer, overwrite)
+		if err != nil {
+			adminLog.WithError(err).WithFields(logrus.Fields{"asn": e.RemoteASN, "node_id": e.NodeID}).Error("peer json import DB error")
+			importErrors = append(importErrors, peerImportError{NodeID: e.NodeID, ASN: e.RemoteASN, Reason: "db error: " + err.Error()})
+			continue
+		}
+
+		switch action {
+		case "imported":
+			imported++
+			h.auditSvc.Log(ctx, "peer.import_peer", adminEmail, &peer.ID, map[string]interface{}{
+				"asn":     e.RemoteASN,
+				"node_id": e.NodeID,
+				"source":  "json",
+			})
+		case "overwritten":
+			overwritten++
+			h.auditSvc.Log(ctx, "peer.import_peer", adminEmail, &peer.ID, map[string]interface{}{
+				"asn":       e.RemoteASN,
+				"node_id":   e.NodeID,
+				"source":    "json",
+				"overwrite": true,
+			})
+		case "skipped":
+			skipped++
+		}
+	}
+
+	h.auditSvc.Log(ctx, "peer.import_json", adminEmail, nil, map[string]interface{}{
+		"imported":    imported,
+		"overwritten": overwritten,
+		"skipped":     skipped,
+		"errors":      len(importErrors),
+		"total":       len(entries),
+		"overwrite":   overwrite,
+	})
+
+	adminLog.WithFields(logrus.Fields{
+		"imported":    imported,
+		"overwritten": overwritten,
+		"skipped":     skipped,
+		"errors":      len(importErrors),
+		"total":       len(entries),
+	}).Info("peer json import completed")
+
+	JSON(w, http.StatusOK, map[string]interface{}{
+		"status":      "completed",
+		"imported":    imported,
+		"overwritten": overwritten,
+		"skipped":     skipped,
+		"total":       len(entries),
+		"errors":      importErrors,
 	})
 }
 
