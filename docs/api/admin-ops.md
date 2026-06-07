@@ -29,6 +29,7 @@ Returns a full diagnostic snapshot of the running center: build info, process/up
   | `redis` | object | `enabled` (boolean), `available` (boolean), `last_error` (string), `key_prefix` (string), `required` (boolean), `configured` (boolean). |
   | `queue` | object | `enabled` (boolean), `available` (boolean), `backend` (string, always `"asynq"`), `concurrency` (integer), `queues` (object: parsed weighted queues), `backoff_until` (string RFC3339, or `null` when not backing off). |
   | `lock` | object | `enabled` (boolean), `available` (boolean), `backend` (string). |
+  | `email` | object | `backend` (string, always `"smtp"` in this build), `configured` (boolean), `host` (string), `from` (string), `tls` (string: `starttls`/`tls`/`none`). |
   | `cache` | object | `backend` (string), `redis_available` (boolean), `redis_last_error` (string), `fallback_enabled` (boolean), `file_size_bytes` (integer), `buckets` (object: bucket name → count), `active_alerts` (array), `bucket_keys` (object: bucket name → array of key entries, for the `alerts`, `registry`, `rate_limit`, and `settings` buckets). |
   | `alerts` | object | Counts per alert type: `bgp_down`, `bgp_fail`, `handshake_stale`, `node_offline`, `latency_high`, `latency_active` (all integer). |
   | `request_log` | object | `last_5min_count` (integer), `last_hour_count` (integer), `error_rate_5xx` (number, percent), `p95_duration_ms` (number). |
@@ -85,6 +86,7 @@ Returns a full diagnostic snapshot of the running center: build info, process/up
       "backoff_until": null
     },
     "lock": { "enabled": true, "available": true, "backend": "redis" },
+    "email": { "backend": "smtp", "configured": true, "host": "mail.example.com", "from": "noreply@example.com", "tls": "starttls" },
     "cache": {
       "backend": "redis",
       "redis_available": true,

@@ -84,14 +84,23 @@ The initial admin account is upserted on **every** startup from these values. Se
 
 ## Email
 
-Outbound transactional email. If `EMAIL_API_URL` is empty, email delivery is disabled and
-a warning is logged. If the URL is set but `EMAIL_API_KEY` is empty, the API will reject
-requests (a warning is logged).
+Outbound transactional email is delivered over **SMTP** as **plain text**. The center
+renders each notification template to plain text in-process and sends it via the configured
+SMTP server.
+
+Set `SMTP_HOST` and `SMTP_FROM` to enable email. Leave `SMTP_HOST` empty to disable email
+delivery (a warning is logged). When `SMTP_HOST` is set, `SMTP_FROM` is required and
+`SMTP_TLS` must be one of `starttls`, `tls`, or `none`.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `EMAIL_API_URL` | no | `""` (empty) | Base URL of the outbound email API, e.g. `https://mail.example.com`. Empty disables email. |
-| `EMAIL_API_KEY` | no | `""` (empty) | Shared secret sent to the email API. |
+| `SMTP_HOST` | no | `""` (empty) | SMTP server host. Set it to enable email; empty disables email delivery. |
+| `SMTP_PORT` | no | `587` | SMTP server port. |
+| `SMTP_USERNAME` | no | `""` (empty) | SMTP auth username. Authentication is skipped when empty. |
+| `SMTP_PASSWORD` | no | `""` (empty) | SMTP auth password. |
+| `SMTP_FROM` | no | `""` (empty) | From address. Required when `SMTP_HOST` is set. |
+| `SMTP_FROM_NAME` | no | `AutoPeer` | From display name. |
+| `SMTP_TLS` | no | `starttls` | TLS mode: `starttls`, `tls` (implicit TLS, e.g. port 465), or `none` (dev only). |
 
 ## DN42 registry
 
@@ -215,9 +224,15 @@ WEBAUTHN_ORIGIN=https://your-center.example.com
 # ── DN42 registry ───────────────────────────────────────────────────────────
 DN42_REGISTRY_TOKEN=
 
-# ── Email API ───────────────────────────────────────────────────────────────
-EMAIL_API_URL=https://mail.example.com
-EMAIL_API_KEY=change-this-shared-secret
+# ── Email (SMTP, plain text only) ────────────────────────────────────────────
+# Set SMTP_HOST and SMTP_FROM to enable email; leave SMTP_HOST empty to disable.
+SMTP_HOST=
+SMTP_PORT=587
+SMTP_USERNAME=
+SMTP_PASSWORD=
+SMTP_FROM=noreply@example.com
+SMTP_FROM_NAME=AutoPeer
+SMTP_TLS=starttls
 
 # ── Notifications (comma-separated admin emails) ────────────────────────────
 ADMIN_NOTIFY_EMAILS=admin@example.com

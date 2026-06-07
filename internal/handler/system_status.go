@@ -13,6 +13,7 @@ import (
 	"github.com/akaere/autopeer-center/internal/crypto"
 	"github.com/akaere/autopeer-center/internal/queue"
 	"github.com/akaere/autopeer-center/internal/redisx"
+	"github.com/akaere/autopeer-center/internal/service"
 	"github.com/akaere/autopeer-center/internal/ws"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/sirupsen/logrus"
@@ -170,6 +171,7 @@ func (h *SystemStatusHandler) Get(w http.ResponseWriter, r *http.Request) {
 		"hub":   hubStat,
 		"redis": redisStatus,
 		"queue": queueStatus,
+		"email": h.emailStatus(),
 		"lock":  h.lockInfo,
 		"cache": map[string]interface{}{
 			"backend":          bucketStats.Backend,
@@ -230,6 +232,22 @@ func (h *SystemStatusHandler) queueStatus() map[string]interface{} {
 		"queues":        queue.ParseQueues(h.cfg.AsynqQueues),
 		"backoff_until": backoff,
 	}
+}
+
+// emailStatus reports the active email backend (api or smtp) for the admin UI.
+func (h *SystemStatusHandler) emailStatus() map[string]interface{} {
+	provider := service.ActiveBackend(h.cfg.EmailConfig())
+	out := map[string]interface{}{"backend": provider}
+	switch provider {
+	case "smtp":
+		out["configured"] = h.cfg.SMTPHost != "" && h.cfg.SMTPFrom != ""
+		out["host"] = h.cfg.SMTPHost
+		out["from"] = h.cfg.SMTPFrom
+		out["tls"] = h.cfg.SMTPTLS
+	default: // api
+		out["configured"] = h.cfg.EmailAPIURL != ""
+	}
+	return out
 }
 
 type requestStatsResult struct {

@@ -1,23 +1,21 @@
 package service
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"time"
 
+	"github.com/akaere/autopeer-center/internal/config"
 	"github.com/sirupsen/logrus"
 )
 
 var emailLog = logrus.WithField("pkg", "service.email")
 
 // EmailLevel defines the user's email notification preference.
-//   0 = no emails
-//   1 = urgent only (peer approved/rejected/suspended/unsuspended/deleted)
-//   2 = urgent + general (adds peer-submitted, bgp alerts, handshake stale)
-//   3 = all (adds latency alerts)
+//
+//	0 = no emails
+//	1 = urgent only (peer approved/rejected/suspended/unsuspended/deleted)
+//	2 = urgent + general (adds peer-submitted, bgp alerts, handshake stale)
+//	3 = all (adds latency alerts)
 const (
 	EmailLevelNone    = 0
 	EmailLevelUrgent  = 1
@@ -25,22 +23,47 @@ const (
 	EmailLevelAll     = 3
 )
 
+// emailTransport delivers one rendered message to one recipient. The SMTP
+// transport (smtpTransport) is always available and renders templates to plain
+// text locally; the optional HTTP API transport (registered via newAPITransport
+// in email_api.go) renders remotely. The transport decides how to render.
+type emailTransport interface {
+	send(to, template string, vars map[string]interface{}) error
+}
+
 type EmailService struct {
-	apiURL                string
-	apiKey                string
-	httpClient            *http.Client
+	transport             emailTransport
 	emailLevelFn          func(asn int64) int // returns 0 if not set or asn not found
 	notificationAllowedFn func(asn int64, key string) bool
 }
 
-func NewEmailService(apiURL, apiKey string) *EmailService {
-	return &EmailService{
-		apiURL: apiURL,
-		apiKey: apiKey,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+// newAPITransport builds the HTTP API transport. It is registered by the API
+// backend implementation (email_api.go) in its init. When that file is absent
+// (the open-source build, which is SMTP-only) it stays nil and the service
+// falls back to SMTP regardless of the configured provider.
+var newAPITransport func(cfg config.EmailConfig) emailTransport
+
+// NewEmailService builds the email service with the backend selected by
+// cfg.Provider ("smtp" → SMTP plain-text; anything else → HTTP API when that
+// backend is compiled in, otherwise SMTP).
+func NewEmailService(cfg config.EmailConfig) *EmailService {
+	var t emailTransport
+	if cfg.Provider != "smtp" && newAPITransport != nil {
+		t = newAPITransport(cfg)
+	} else {
+		t = newSMTPTransport(cfg)
 	}
+	return &EmailService{transport: t}
+}
+
+// ActiveBackend reports which transport NewEmailService(cfg) would select:
+// "api" or "smtp". The admin system-status endpoint uses it to display the
+// live backend.
+func ActiveBackend(cfg config.EmailConfig) string {
+	if cfg.Provider != "smtp" && newAPITransport != nil {
+		return "api"
+	}
+	return "smtp"
 }
 
 // SetEmailLevelFn registers a function that returns the email level for a given ASN.
@@ -71,19 +94,6 @@ func (s *EmailService) allowedNotification(asn int64, key string, legacyRequired
 		return s.notificationAllowedFn(asn, key)
 	}
 	return s.allowedLevel(asn, legacyRequired)
-}
-
-type emailRequest struct {
-	To       string      `json:"to"`
-	Template string      `json:"template"`
-	Vars     interface{} `json:"vars"`
-}
-
-type emailResponse struct {
-	Success   bool   `json:"success"`
-	MessageID string `json:"messageId"`
-	Error     string `json:"error"`
-	Message   string `json:"message"`
 }
 
 func (s *EmailService) SendVerificationCode(to string, asn int64, code string) error {
@@ -327,69 +337,29 @@ func (s *EmailService) SendPeerMTUUpdated(to string, asn int64, nodeName string,
 	})
 }
 
-var errEmailNotConfigured = fmt.Errorf("email service not configured: EMAIL_API_URL is empty")
-
+// send normalizes vars to a map and dispatches to the configured transport.
 func (s *EmailService) send(to, template string, vars interface{}) error {
-	if s.apiURL == "" {
-		emailLog.WithFields(logrus.Fields{
-			"template": template,
-			"to":       MaskEmail(to),
-		}).Warn("email skipped: EMAIL_API_URL not configured")
-		return errEmailNotConfigured
-	}
+	return s.transport.send(to, template, toVarMap(vars))
+}
 
-	body, err := json.Marshal(emailRequest{
-		To:       to,
-		Template: template,
-		Vars:     vars,
-	})
+// toVarMap coerces the vars passed by the public Send* methods into a map.
+// All callers already pass map[string]interface{}, which is the fast path; the
+// JSON round-trip is a defensive fallback for any future non-map caller and
+// keeps API-mode marshalling lossless.
+func toVarMap(vars interface{}) map[string]interface{} {
+	if vars == nil {
+		return map[string]interface{}{}
+	}
+	if m, ok := vars.(map[string]interface{}); ok {
+		return m
+	}
+	b, err := json.Marshal(vars)
 	if err != nil {
-		emailLog.WithError(err).Error("marshal email request failed")
-		return fmt.Errorf("marshal email request: %w", err)
+		return map[string]interface{}{}
 	}
-
-	req, err := http.NewRequest("POST", s.apiURL+"/send", bytes.NewReader(body))
-	if err != nil {
-		emailLog.WithError(err).Error("create email request failed")
-		return fmt.Errorf("create request: %w", err)
+	var m map[string]interface{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		return map[string]interface{}{}
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-API-Key", s.apiKey)
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		emailLog.WithError(err).WithFields(logrus.Fields{
-			"template": template,
-			"to":       MaskEmail(to),
-		}).Error("send email HTTP request failed")
-		return fmt.Errorf("send email: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		emailLog.WithError(err).Error("read email response failed")
-		return fmt.Errorf("read response: %w", err)
-	}
-
-	emailLog.WithFields(logrus.Fields{
-		"template": template,
-		"to":       MaskEmail(to),
-		"status":   resp.StatusCode,
-		"success":  resp.StatusCode == http.StatusOK,
-	}).Debug("email API response")
-
-	if resp.StatusCode != http.StatusOK {
-		var errResp emailResponse
-		json.Unmarshal(respBody, &errResp)
-		emailLog.WithFields(logrus.Fields{
-			"template": template,
-			"to":       MaskEmail(to),
-			"status":   resp.StatusCode,
-			"message":  errResp.Message,
-		}).Error("email API returned error")
-		return fmt.Errorf("email API error (%d): %s", resp.StatusCode, errResp.Message)
-	}
-
-	return nil
+	return m
 }

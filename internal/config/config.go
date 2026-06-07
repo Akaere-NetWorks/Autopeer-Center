@@ -30,8 +30,16 @@ type Config struct {
 	AsynqMonitorPageSize   int
 	CacheLocalFallback     bool
 	DN42RegistryToken      string
+	EmailProvider          string
 	EmailAPIURL            string
 	EmailAPIKey            string
+	SMTPHost               string
+	SMTPPort               int
+	SMTPUsername           string
+	SMTPPassword           string
+	SMTPFrom               string
+	SMTPFromName           string
+	SMTPTLS                string
 	AdminInitialEmail      string
 	AdminInitialPassword   string
 	ListenAddr             string
@@ -63,6 +71,37 @@ type Config struct {
 	ReconcileInterval      time.Duration
 }
 
+// EmailConfig is the subset of configuration consumed by the email service.
+// It decouples the service package from the full Config struct.
+type EmailConfig struct {
+	Provider     string // "api" | "smtp"
+	APIURL       string
+	APIKey       string
+	SMTPHost     string
+	SMTPPort     int
+	SMTPUsername string
+	SMTPPassword string
+	SMTPFrom     string
+	SMTPFromName string
+	SMTPTLS      string // "starttls" | "tls" | "none"
+}
+
+// EmailConfig returns the email-related configuration as a standalone value.
+func (c *Config) EmailConfig() EmailConfig {
+	return EmailConfig{
+		Provider:     c.EmailProvider,
+		APIURL:       c.EmailAPIURL,
+		APIKey:       c.EmailAPIKey,
+		SMTPHost:     c.SMTPHost,
+		SMTPPort:     c.SMTPPort,
+		SMTPUsername: c.SMTPUsername,
+		SMTPPassword: c.SMTPPassword,
+		SMTPFrom:     c.SMTPFrom,
+		SMTPFromName: c.SMTPFromName,
+		SMTPTLS:      c.SMTPTLS,
+	}
+}
+
 func Load() (*Config, error) {
 	cfg := &Config{
 		DatabaseURL:            getEnv("DATABASE_URL", ""),
@@ -77,8 +116,13 @@ func Load() (*Config, error) {
 		AsynqMonitorPageSize:   GetEnvInt("ASYNQ_MONITOR_PAGE_SIZE", 20),
 		CacheLocalFallback:     getEnvBool("CACHE_LOCAL_FALLBACK", true),
 		DN42RegistryToken:      getEnv("DN42_REGISTRY_TOKEN", ""),
-		EmailAPIURL:            getEnv("EMAIL_API_URL", ""),
-		EmailAPIKey:            getEnv("EMAIL_API_KEY", ""),
+		SMTPHost:               strings.TrimSpace(getEnv("SMTP_HOST", "")),
+		SMTPPort:               GetEnvInt("SMTP_PORT", 587),
+		SMTPUsername:           getEnv("SMTP_USERNAME", ""),
+		SMTPPassword:           getEnv("SMTP_PASSWORD", ""),
+		SMTPFrom:               strings.TrimSpace(getEnv("SMTP_FROM", "")),
+		SMTPFromName:           getEnv("SMTP_FROM_NAME", "AutoPeer"),
+		SMTPTLS:                strings.ToLower(strings.TrimSpace(getEnv("SMTP_TLS", "starttls"))),
 		AdminInitialEmail:      getEnv("ADMIN_INITIAL_EMAIL", ""),
 		AdminInitialPassword:   getEnv("ADMIN_INITIAL_PASSWORD", ""),
 		ListenAddr:             getEnv("LISTEN_ADDR", ":8080"),
@@ -113,8 +157,11 @@ func Load() (*Config, error) {
 	log.WithFields(logrus.Fields{
 		"database_url":              maskPassword(cfg.DatabaseURL),
 		"jwt_secret":                "***",
-		"email_api_url":             cfg.EmailAPIURL,
-		"email_api_key":             "***",
+		"smtp_host":                 cfg.SMTPHost,
+		"smtp_port":                 cfg.SMTPPort,
+		"smtp_from":                 cfg.SMTPFrom,
+		"smtp_tls":                  cfg.SMTPTLS,
+		"smtp_password":             "***",
 		"listen_addr":               cfg.ListenAddr,
 		"cors_origin":               cfg.CORSOrigin,
 		"external_url":              cfg.ExternalURL,
@@ -153,10 +200,23 @@ func Load() (*Config, error) {
 
 	log.Info("config loaded successfully")
 
-	if cfg.EmailAPIURL == "" {
-		log.Warn("EMAIL_API_URL is empty — email delivery is disabled")
-	} else if cfg.EmailAPIKey == "" {
-		log.Warn("EMAIL_API_KEY is empty — email requests will be rejected by the API")
+	if cfg.SMTPHost == "" {
+		log.Warn("SMTP_HOST is empty — email delivery is disabled")
+	} else {
+		if cfg.SMTPFrom == "" {
+			return nil, fmt.Errorf("SMTP_FROM is required when SMTP_HOST is set")
+		}
+		switch cfg.SMTPTLS {
+		case "starttls", "tls", "none":
+		default:
+			return nil, fmt.Errorf("SMTP_TLS must be one of starttls|tls|none (got %q)", cfg.SMTPTLS)
+		}
+		log.WithFields(logrus.Fields{
+			"smtp_host": cfg.SMTPHost,
+			"smtp_port": cfg.SMTPPort,
+			"smtp_from": cfg.SMTPFrom,
+			"smtp_tls":  cfg.SMTPTLS,
+		}).Info("email backend: smtp")
 	}
 
 	if strings.TrimRight(cfg.ExternalURL, "/") == "http://localhost:8080" {

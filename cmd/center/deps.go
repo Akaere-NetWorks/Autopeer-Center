@@ -103,7 +103,7 @@ func BuildDeps(
 
 	// ── Services ─────────────────────────────────────────────────────────────
 	registry := service.NewRegistryService(cfg.DN42RegistryToken, c)
-	emailSvc := service.NewEmailService(cfg.EmailAPIURL, cfg.EmailAPIKey)
+	emailSvc := service.NewEmailService(cfg.EmailConfig())
 	auditSvc := service.NewAuditService(auditRepo)
 
 	// ── WebSocket hub ────────────────────────────────────────────────────────
