@@ -302,6 +302,16 @@ func (bc *BotConn) ReadPump(h *Hub) {
 			default:
 				h.sendToBot(bc, TypeBotUserPeerMetricsResult, msg.ID, BotUserPeerMetricsResultPayload{})
 			}
+		case TypeBotUserPeerUpdate:
+			select {
+			case h.botSem <- struct{}{}:
+				go func() {
+					defer func() { <-h.botSem }()
+					h.handleBotUserPeerUpdate(bc, msg)
+				}()
+			default:
+				h.sendToBot(bc, TypeBotUserPeerUpdateResult, msg.ID, BotUserPeerUpdateResultPayload{Success: false, Error: "too many concurrent commands"})
+			}
 		case TypeBotAdminPeers:
 			select {
 			case h.botSem <- struct{}{}:
@@ -321,6 +331,16 @@ func (bc *BotConn) ReadPump(h *Hub) {
 				}()
 			default:
 				h.sendToBot(bc, TypeBotAdminPeerActionResult, msg.ID, BotAdminPeerActionResultPayload{Success: false, Error: "too many concurrent commands"})
+			}
+		case TypeBotAdminPeerDetail:
+			select {
+			case h.botSem <- struct{}{}:
+				go func() {
+					defer func() { <-h.botSem }()
+					h.handleBotAdminPeerDetail(bc, msg)
+				}()
+			default:
+				h.sendToBot(bc, TypeBotAdminPeerDetailResult, msg.ID, BotAdminPeerDetailResultPayload{})
 			}
 		case TypeBotAdminNodes:
 			select {

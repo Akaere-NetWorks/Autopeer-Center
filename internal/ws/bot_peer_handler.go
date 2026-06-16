@@ -4,8 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
+	"github.com/akaere/autopeer-center/internal/model"
 	"github.com/akaere/autopeer-center/internal/peering"
 )
 
@@ -274,4 +279,214 @@ func (h *Hub) handleBotUserPeerMetrics(bc *BotConn, msg Message) {
 	}
 
 	h.sendToBot(bc, TypeBotUserPeerMetricsResult, msg.ID, BotUserPeerMetricsResultPayload{Found: true, Metrics: pts})
+}
+
+var (
+	botBase64Re   = regexp.MustCompile(`^[A-Za-z0-9+/]+=*$`)
+	botHostnameRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$`)
+)
+
+func botValidateEndpoint(ep string) bool {
+	hostStr, portStr, err := net.SplitHostPort(ep)
+	if err != nil {
+		return false
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return false
+	}
+	if net.ParseIP(hostStr) != nil {
+		return true
+	}
+	return botHostnameRe.MatchString(hostStr)
+}
+
+func botValidateLLA(lla string) bool {
+	ip := net.ParseIP(lla)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLinkLocalUnicast()
+}
+
+func (h *Hub) handleBotUserPeerUpdate(bc *BotConn, msg Message) {
+	var payload BotUserPeerUpdatePayload
+	if data, err := json.Marshal(msg.Payload); err == nil {
+		json.Unmarshal(data, &payload)
+	}
+
+	send := func(success bool, errMsg string) {
+		h.sendToBot(bc, TypeBotUserPeerUpdateResult, msg.ID, BotUserPeerUpdateResultPayload{Success: success, Error: errMsg})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	binding, err := h.botBindings.GetByTgUserID(ctx, payload.TgUserID)
+	if err != nil || binding == nil {
+		send(false, "not bound")
+		return
+	}
+
+	// Require at least one field
+	if payload.RemotePubkey == nil && payload.RemoteEndpoint == nil && payload.RemoteLLA == nil && !payload.MTUSet {
+		send(false, "no fields to update")
+		return
+	}
+
+	// Validate fields
+	if payload.RemotePubkey != nil {
+		pk := strings.TrimSpace(*payload.RemotePubkey)
+		if !botBase64Re.MatchString(pk) || len(pk) < 40 {
+			send(false, "invalid WireGuard public key (must be Base64)")
+			return
+		}
+	}
+	if payload.RemoteEndpoint != nil && !botValidateEndpoint(*payload.RemoteEndpoint) {
+		send(false, "invalid endpoint (format: IP:Port or [IPv6]:Port)")
+		return
+	}
+	if payload.RemoteLLA != nil && !botValidateLLA(*payload.RemoteLLA) {
+		send(false, "invalid link-local address (must be fe80::/10)")
+		return
+	}
+	if payload.MTUSet && payload.MTU != nil && (*payload.MTU < 576 || *payload.MTU > 9000) {
+		send(false, "MTU must be between 576 and 9000")
+		return
+	}
+
+	// Acquire lock
+	release, busy := h.acquirePeerLock(ctx, "peer:"+payload.PeerID)
+	if busy {
+		send(false, "another peer operation is in progress, please retry")
+		return
+	}
+	defer release()
+
+	peer, err := h.peers.GetByIDAndASN(ctx, payload.PeerID, binding.ASN)
+	if err != nil || peer == nil {
+		send(false, "peer not found")
+		return
+	}
+
+	if peer.Status != "pending" && peer.Status != "active" {
+		send(false, "only pending or active peers can be edited")
+		return
+	}
+
+	// Merge fields
+	newPubkey := peer.RemotePubkey
+	newEndpoint := peer.RemoteEndpoint
+	newLLA := peer.RemoteLLA
+	newMTU := peer.MTU
+	if payload.RemotePubkey != nil {
+		newPubkey = *payload.RemotePubkey
+	}
+	if payload.RemoteEndpoint != nil {
+		newEndpoint = *payload.RemoteEndpoint
+	}
+	if payload.RemoteLLA != nil {
+		newLLA = *payload.RemoteLLA
+	}
+	if payload.MTUSet {
+		newMTU = payload.MTU
+	}
+
+	// If active, remove + re-add on agent with rollback
+	if peer.Status == "active" {
+		removeResp, removeErr := h.SendCommand(peer.NodeID, TypePeerRemove, PeerRemovePayload{
+			PeerID: peer.ID,
+			ASN:    peer.RemoteASN,
+		})
+		if removeErr != nil {
+			send(false, "failed to remove old peer config: "+removeErr.Error())
+			return
+		}
+		if removeResp.Success != nil && !*removeResp.Success {
+			send(false, "agent rejected peer removal: "+removeResp.Error)
+			return
+		}
+
+		addResp, addErr := h.SendCommand(peer.NodeID, TypePeerAdd, PeerAddPayload{
+			PeerID:         peer.ID,
+			ASN:            peer.RemoteASN,
+			RemoteEndpoint: newEndpoint,
+			RemoteWgPubkey: newPubkey,
+			RemoteLLA:      newLLA,
+			ListenPort:     peer.WgListenPort,
+			WgInterface:    peer.WgInterfaceName,
+			MTU:            newMTU,
+			WgPreSharedKey: peer.WgPreSharedKey,
+		})
+		if addErr != nil {
+			// Rollback: re-add with old config
+			h.SendCommand(peer.NodeID, TypePeerAdd, PeerAddPayload{
+				PeerID:         peer.ID,
+				ASN:            peer.RemoteASN,
+				RemoteEndpoint: peer.RemoteEndpoint,
+				RemoteWgPubkey: peer.RemotePubkey,
+				RemoteLLA:      peer.RemoteLLA,
+				ListenPort:     peer.WgListenPort,
+				WgInterface:    peer.WgInterfaceName,
+				MTU:            peer.MTU,
+				WgPreSharedKey: peer.WgPreSharedKey,
+			})
+			send(false, "failed to re-add peer (rollback attempted): "+addErr.Error())
+			return
+		}
+		if addResp.Success != nil && !*addResp.Success {
+			// Rollback: re-add with old config
+			h.SendCommand(peer.NodeID, TypePeerAdd, PeerAddPayload{
+				PeerID:         peer.ID,
+				ASN:            peer.RemoteASN,
+				RemoteEndpoint: peer.RemoteEndpoint,
+				RemoteWgPubkey: peer.RemotePubkey,
+				RemoteLLA:      peer.RemoteLLA,
+				ListenPort:     peer.WgListenPort,
+				WgInterface:    peer.WgInterfaceName,
+				MTU:            peer.MTU,
+				WgPreSharedKey: peer.WgPreSharedKey,
+			})
+			send(false, "agent rejected peer re-add (rollback attempted): "+addResp.Error)
+			return
+		}
+	}
+
+	// Update DB
+	fields := map[string]interface{}{
+		"remote_pubkey":   newPubkey,
+		"remote_endpoint": newEndpoint,
+		"remote_lla":      newLLA,
+		"mtu":             newMTU,
+		"updated_at":      "now()",
+	}
+	if err := h.peers.UpdateFields(ctx, peer.ID, fields); err != nil {
+		send(false, "failed to update peer")
+		return
+	}
+
+	// Audit log
+	operator := fmt.Sprintf("AS%d", binding.ASN)
+	changes := map[string]interface{}{}
+	if payload.RemotePubkey != nil {
+		changes["remote_pubkey"] = "updated"
+	}
+	if payload.RemoteEndpoint != nil {
+		changes["remote_endpoint"] = "updated"
+	}
+	if payload.RemoteLLA != nil {
+		changes["remote_lla"] = "updated"
+	}
+	if payload.MTUSet {
+		changes["old_mtu"] = peer.MTU
+		changes["new_mtu"] = payload.MTU
+	}
+	h.audit.Log(ctx, &model.AuditLog{
+		Action:   "peer.user_update",
+		Operator: operator,
+		TargetID: &peer.ID,
+		Detail:   changes,
+	})
+
+	send(true, "")
 }

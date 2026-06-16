@@ -223,6 +223,45 @@ func (h *Hub) handleBotAdminUnsuspend(bc *BotConn, msgID string, ctx context.Con
 	})
 }
 
+func (h *Hub) handleBotAdminPeerDetail(bc *BotConn, msg Message) {
+	var payload BotAdminPeerDetailPayload
+	if data, err := json.Marshal(msg.Payload); err == nil {
+		json.Unmarshal(data, &payload)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	peer, err := h.peers.GetByIDWithNode(ctx, payload.PeerID)
+	if err != nil || peer == nil {
+		h.sendToBot(bc, TypeBotAdminPeerDetailResult, msg.ID, BotAdminPeerDetailResultPayload{Found: false})
+		return
+	}
+
+	info := &BotAdminPeerInfo{
+		ID:           peer.ID,
+		NodeName:     peer.NodeName,
+		NodeLocation: peer.NodeLocation,
+		RemoteASN:    peer.RemoteASN,
+		Status:       peer.Status,
+		ContactEmail: peer.ContactEmail,
+		RejectReason: peer.RejectReason,
+		CreatedAt:    peer.CreatedAt.Format(time.RFC3339),
+	}
+
+	// Fetch latest metrics for RTT and BGP state
+	summary, _ := h.metrics.GetLatestPeerMetricSummary(ctx, peer.ID)
+	if summary != nil {
+		info.LatestRtt = summary.RttMs
+		info.LatestBGPState = summary.BGPState
+	}
+
+	h.sendToBot(bc, TypeBotAdminPeerDetailResult, msg.ID, BotAdminPeerDetailResultPayload{
+		Found: true,
+		Peer:  info,
+	})
+}
+
 func (h *Hub) handleBotAdminNodes(bc *BotConn, msg Message) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

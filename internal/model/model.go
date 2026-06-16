@@ -72,8 +72,10 @@ type Peer struct {
 	RejectReason            *string   `json:"reject_reason,omitempty" bun:"reject_reason"`
 	EndpointMismatchSince   *time.Time `json:"endpoint_mismatch_since,omitempty" bun:"endpoint_mismatch_since"`
 	BGPSuspendedByEndpoint  bool      `json:"bgp_suspended_by_endpoint" bun:"bgp_suspended_by_endpoint,default:false"`
+	LastActiveAt            *time.Time `json:"last_active_at,omitempty" bun:"last_active_at"`
+	InactivityWarningStage  int        `json:"inactivity_warning_stage" bun:"inactivity_warning_stage,default:0"`
 	CreatedAt               time.Time `json:"created_at" bun:"created_at,nullzero,default:now()"`
-	UpdatedAt          time.Time `json:"updated_at" bun:"updated_at,nullzero,default:now()"`
+	UpdatedAt               time.Time `json:"updated_at" bun:"updated_at,nullzero,default:now()"`
 }
 
 type PeerWithNode struct {
@@ -454,6 +456,27 @@ type PasskeyCredential struct {
 	Name         string     `json:"name" bun:"name"`
 	CreatedAt    time.Time  `json:"created_at" bun:"created_at,nullzero,default:now()"`
 	LastUsedAt   *time.Time `json:"last_used_at,omitempty" bun:"last_used_at"`
+}
+
+// FlapAgent is an allowlisted flapalerted-agent identity. It replaces the
+// former FLAP_AGENT_TOKENS / FLAP_AGENT_PUBKEYS environment-variable allowlist;
+// admins manage these in the dashboard. Authentication mirrors the node agent:
+// a bearer token bootstraps the connection, then the first X25519 public key is
+// pinned (TOFU) in AgentPubkey and the session is ChaCha20-Poly1305 encrypted.
+type FlapAgent struct {
+	bun.BaseModel `bun:"table:flap_agents,alias:fa"`
+
+	ID          string     `json:"id" bun:"id,pk,nullzero,default:gen_random_uuid()"`
+	AgentID     string     `json:"agent_id" bun:"agent_id"`
+	Name        string     `json:"name" bun:"name"`
+	Description string     `json:"description" bun:"description"`
+	Token       string     `json:"-" bun:"token"`
+	AgentPubkey string     `json:"agent_pubkey" bun:"agent_pubkey"`
+	Enabled     bool       `json:"enabled" bun:"enabled"`
+	Version     string     `json:"version" bun:"version"`
+	LastSeenAt  *time.Time `json:"last_seen_at,omitempty" bun:"last_seen_at"`
+	CreatedAt   time.Time  `json:"created_at" bun:"created_at,nullzero,default:now()"`
+	UpdatedAt   time.Time  `json:"updated_at" bun:"updated_at,nullzero,default:now()"`
 }
 
 type WebAuthnSession struct {

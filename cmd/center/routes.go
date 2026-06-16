@@ -182,6 +182,7 @@ func setupRoutes(r chi.Router, deps *AppDeps) {
 			r.Post("/admin/peers/import", deps.AdminHandler.ImportPeers)
 			r.Get("/admin/peers/{id}", deps.AdminHandler.GetPeer)
 			r.Get("/admin/peers/{id}/metrics", deps.AdminHandler.PeerMetrics)
+			r.Get("/admin/peers/{id}/traffic", deps.TrafficHandler.PeerTraffic)
 			r.Post("/admin/peers/{id}/approve", deps.AdminHandler.ApprovePeer)
 			r.Post("/admin/peers/{id}/reject", deps.AdminHandler.RejectPeer)
 			r.Post("/admin/peers/{id}/suspend", deps.AdminHandler.SuspendPeer)
@@ -193,6 +194,7 @@ func setupRoutes(r chi.Router, deps *AppDeps) {
 			r.Post("/admin/nodes", deps.AdminHandler.CreateNode)
 			r.Put("/admin/nodes/{id}", deps.AdminHandler.UpdateNode)
 			r.Delete("/admin/nodes/{id}", deps.AdminHandler.DeleteNode)
+			r.Get("/admin/nodes/{id}/traffic", deps.TrafficHandler.NodeTraffic)
 			r.Post("/admin/nodes/{id}/import", deps.AdminHandler.ImportNodePeers)
 			r.Post("/admin/nodes/{id}/bird-refresh", deps.AdminHandler.RefreshBirdDetails)
 			r.Post("/admin/nodes/{id}/update", deps.AdminHandler.UpdateAgent)
@@ -206,6 +208,14 @@ func setupRoutes(r chi.Router, deps *AppDeps) {
 			r.Put("/admin/notifications", deps.AdminHandler.UpdateNotificationSetting)
 			r.Get("/admin/audit", deps.AdminHandler.ListAuditLogs)
 			r.Get("/admin/stats", deps.StatsHandler.Admin)
+
+			// Flap agent (flapalerted-agent allowlist) management
+			r.Get("/admin/flap/agents", deps.AdminFlapHandler.List)
+			r.Post("/admin/flap/agents", deps.AdminFlapHandler.Create)
+			r.Put("/admin/flap/agents/{id}", deps.AdminFlapHandler.Update)
+			r.Delete("/admin/flap/agents/{id}", deps.AdminFlapHandler.Delete)
+			r.Post("/admin/flap/agents/{id}/regenerate-token", deps.AdminFlapHandler.RegenerateToken)
+			r.Post("/admin/flap/agents/{id}/reset-pubkey", deps.AdminFlapHandler.ResetPubkey)
 
 			r.Get("/admin/bot/settings", deps.AdminHandler.GetBotSettings)
 			r.Put("/admin/bot/settings", deps.AdminHandler.UpdateBotSetting)
@@ -268,6 +278,15 @@ func setupRoutes(r chi.Router, deps *AppDeps) {
 		r.Get("/agent/ws", deps.AgentHandler.HandleWebSocket)
 		r.Get("/agent/download", deps.AgentHandler.HandleDownload)
 		r.Get("/bot/ws", deps.BotHandler.HandleWebSocket)
+
+		// Flap (BGP route-flap monitor) — public endpoints + dedicated agent WS.
+		// Center holds no flap state; it relays to the connected flapalerted-agent.
+		r.Get("/flap/agents", deps.FlapHandler.ListAgents)
+		r.Get("/flap/snapshot", deps.FlapHandler.Snapshot)
+		r.Get("/flap/prefix", deps.FlapHandler.Prefix)
+		r.Get("/flap/metrics", deps.FlapHandler.Metrics)
+		r.Get("/flap/stream", deps.FlapHandler.Stream)
+		r.Get("/flap/agent/ws", deps.FlapHandler.HandleWebSocket)
 	})
 
 	log.Debug("router setup complete")

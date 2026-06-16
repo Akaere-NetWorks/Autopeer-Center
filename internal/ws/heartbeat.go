@@ -103,6 +103,8 @@ func (h *Hub) handleHeartbeat(nodeID string, data []byte) {
 		})
 	}
 
+	var activePeerIDs []string
+
 	contactMap := make(map[string]peerContact)
 	if h.sendEmail != nil {
 		contactCtx, contactCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -131,6 +133,10 @@ func (h *Hub) handleHeartbeat(nodeID string, data []byte) {
 			}
 		}
 
+		if lastHandshake != nil && time.Since(*lastHandshake) <= 10*time.Minute {
+			activePeerIDs = append(activePeerIDs, p.PeerID)
+		}
+
 		peerCtx, peerCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		err := h.metrics.InsertPeerMetricFromHeartbeat(peerCtx, p.PeerID, nodeID, &model.PeerMetric{
 			RxBytes:          p.WgRxBytes,
@@ -150,6 +156,14 @@ func (h *Hub) handleHeartbeat(nodeID string, data []byte) {
 		}
 
 		h.checkAlerts(ctx, nodeID, &p, lastHandshake, contactMap)
+	}
+
+	if len(activePeerIDs) > 0 {
+		markCtx, markCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := h.peers.MarkPeersActive(markCtx, activePeerIDs, time.Now()); err != nil {
+			log.WithError(err).WithField("node_id", nodeID).Warn("mark peers active failed")
+		}
+		markCancel()
 	}
 }
 

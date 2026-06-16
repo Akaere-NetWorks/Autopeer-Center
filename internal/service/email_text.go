@@ -65,6 +65,7 @@ var textRenderers = map[string]textRenderer{
 	"peer-endpoint-mismatch":  renderPeerEndpointMismatch,
 	"peer-endpoint-recovered": renderPeerEndpointRecovered,
 	"test-email":              renderTestEmail,
+	"peer-inactive-warning":   renderPeerInactiveWarning,
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -473,6 +474,33 @@ func renderPeerEndpointRecovered(m varMap) (string, string) {
 	b.blank()
 	b.kv("Configured Endpoint", m.str("endpoint"))
 	b.kv("Actual Endpoint", m.str("actual"))
+	return subject, b.String()
+}
+
+func renderPeerInactiveWarning(m varMap) (string, string) {
+	level := m.str("level")
+	days := m.str("daysInactive")
+	var subject, lead string
+	switch level {
+	case "60":
+		subject = "Peering removed for inactivity – " + m.asn()
+		lead = "has been inactive for " + days + " days and has been REMOVED."
+	case "50":
+		subject = "Final inactivity warning – " + m.asn()
+		lead = "has been inactive for " + days + " days. This is the final warning before removal — to keep this peering, restore your WireGuard tunnel and BGP session now."
+	default: // 45 and anything else
+		subject = "Inactivity warning – " + m.asn()
+		lead = "has been inactive for " + days + " days. To keep this peering, restore your WireGuard tunnel and BGP session."
+	}
+	var b textBuilder
+	b.line("Peering inactivity warning")
+	b.line(m.asn() + " · " + m.str("nodeName"))
+	b.blank()
+	b.line("Your peering session for " + m.asn() + " on " + m.str("nodeName") + " " + lead)
+	b.blank()
+	b.line("Inactive peers are removed automatically after 60 days of inactivity. You will receive further warnings before removal.")
+	b.blank()
+	b.line("If your tunnel is already working, you can ignore this message.")
 	return subject, b.String()
 }
 

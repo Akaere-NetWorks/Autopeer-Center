@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/akaere/autopeer-center/internal/cache"
+	"github.com/akaere/autopeer-center/internal/clickhouse"
 	"github.com/akaere/autopeer-center/internal/crypto"
 	"github.com/akaere/autopeer-center/internal/lock"
 	"github.com/akaere/autopeer-center/internal/model"
@@ -36,6 +37,10 @@ type Hub struct {
 	audit       repository.AuditRepository
 	stats       repository.StatsRepository
 	cache       *cache.Cache
+
+	// traffic is the optional ClickHouse-backed analytics store. nil == the
+	// traffic-analytics feature is disabled (reports are dropped on arrival).
+	traffic *clickhouse.TrafficStore
 
 	centerKeyPair *crypto.KeyPair
 
@@ -87,6 +92,12 @@ func NewHub(
 		nodeUpd:     make(map[string]*nodeUpdEntry),
 		botSem:      make(chan struct{}, 64),
 	}
+}
+
+// SetTrafficStore wires the optional ClickHouse traffic store. Passing nil keeps
+// the feature disabled.
+func (h *Hub) SetTrafficStore(store *clickhouse.TrafficStore) {
+	h.traffic = store
 }
 
 func (h *Hub) SetBotAuthToken(token string) {

@@ -124,6 +124,18 @@ verification.
 | `TURNSTILE_SITE_KEY` | no | `""` (empty) | Cloudflare Turnstile site key (public). |
 | `TURNSTILE_SECRET_KEY` | no | `""` (empty) | Cloudflare Turnstile secret key (server-side verification). |
 
+## Flap monitor
+
+The allowlist of `flapalerted-agent` BGP route-flap detectors permitted to
+connect to `GET /api/v1/flap/agent/ws` is **no longer configured via environment
+variables**. Flap agents are now managed by admins in the dashboard and stored in
+the `flap_agents` table (admin endpoints under `/api/v1/admin/flap/agents`).
+Authentication mirrors the node agent: a bearer token bootstraps the connection,
+then an X25519 key exchange pins the agent's public key (TOFU) and encrypts the
+session. With no flap agents configured, the public `/api/v1/flap/*` endpoints
+return empty payloads. See [websocket-protocol.md](./websocket-protocol.md),
+[database.md](./database.md), and [api/flap.md](./api/flap.md).
+
 ## Redis & asynq
 
 Redis is optional. Redis is enabled only when `REDIS_URL` is non-empty; it backs the
@@ -141,6 +153,21 @@ center can fall back to a local on-disk cache (see `CACHE_LOCAL_FALLBACK` and `C
 | `ASYNQ_READONLY_MONITOR` | no | `false` | If `true`, disables the mutating queue-monitor routes (delete/archive/retry), leaving the asynq monitor read-only. |
 | `ASYNQ_MONITOR_PAGE_SIZE` | no | `20` | Page size for the asynq queue-monitor listings. |
 
+## ClickHouse (traffic analytics)
+
+ClickHouse is optional and backs the DN42 traffic-sampling analytics feature. It
+is enabled only when `CLICKHOUSE_URL` is non-empty. When unset (or unreachable
+with `CLICKHOUSE_REQUIRED=false`), the entire feature is disabled end-to-end:
+agent `traffic.report` messages are dropped, the traffic API endpoints return
+`503 traffic_analytics_disabled`, and the admin stats response reports
+`traffic_analytics_enabled: false` so the frontend hides the panels. The center
+runs normally without it — this mirrors the optional-Redis pattern.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `CLICKHOUSE_URL` | no | `""` (empty) | ClickHouse native DSN, e.g. `clickhouse://user:pass@host:9000/autopeer`. Empty disables traffic analytics. On startup the center connects, pings, and creates the analytics tables (`CREATE TABLE IF NOT EXISTS`). |
+| `CLICKHOUSE_REQUIRED` | no | `false` | If `true`, startup fails when `CLICKHOUSE_URL` is set but ClickHouse cannot be reached or the schema cannot be created. If `false`, the center warns and disables the feature. |
+
 ## Reconcile worker
 
 Periodically reconciles the center's view of active peers with each agent via the
@@ -150,6 +177,20 @@ Periodically reconciles the center's view of active peers with each agent via th
 |---|---|---|---|
 | `RECONCILE_ENABLED` | no | `true` | Enable the periodic peer reconcile worker. |
 | `RECONCILE_INTERVAL` | no | `10m` | Interval between reconcile passes (duration string or seconds). |
+
+## Inactivity sweep
+
+Daily background worker that sends mandatory inactivity warnings (email + Telegram)
+at 45, 50, and 60 days of peer inactivity and deletes the peer at 60 days. Warnings
+**bypass all per-user notification preferences** — they always deliver.
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `INACTIVITY_SWEEP_ENABLED` | no | `true` | Enable the daily inactivity sweep. |
+| `INACTIVITY_WARN_FIRST_DAYS` | no | `45` | Days of inactivity before the first warning. |
+| `INACTIVITY_WARN_SECOND_DAYS` | no | `50` | Days of inactivity before the second warning. |
+| `INACTIVITY_DELETE_DAYS` | no | `60` | Days of inactivity after which the peer is deleted. |
+| `INACTIVITY_DRY_RUN` | no | `false` | When `true`, logs intended actions without sending notifications or deleting. |
 
 ## Persistent paths
 

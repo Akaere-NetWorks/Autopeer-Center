@@ -117,7 +117,7 @@ Startup order in `main.go`:
 7. **Router** — `setupRoutes` mounts middleware and routes.
 8. **Queue & schedulers** — the queue server starts, periodic tasks register, and
    an initial tick is enqueued. When asynq is **not** enabled, the center starts
-   the equivalent in-process schedulers (cleanup, latency) as a fallback.
+    the equivalent in-process schedulers (cleanup, latency, inactivity) as a fallback.
 9. **Reconcile worker** — started when `RECONCILE_ENABLED` is on; the distributed
    locker makes it safe to run across multiple center replicas.
 10. **HTTP server** — listens on `LISTEN_ADDR` (default `:8080`) with
@@ -150,9 +150,11 @@ is invented here; this mirrors the package table in
 | `internal/endpoint/` | Endpoint resolution and comparison (detects when an agent's actual WG endpoint drifts from the configured one) |
 | `internal/latency/` | RTT checker and alerting worker |
 | `internal/cleanup/` | Housekeeping / expiry workers |
+| `internal/inactivity/` | Daily inactivity sweep — sends mandatory warnings at 45/50/60 days, deletes at 60 days (bypasses per-user notification preferences) |
 | `internal/queue/` | asynq job queue and periodic scheduler (Redis-backed) |
 | `internal/lock/` | Distributed locking — Redis-backed, with a process-local fallback |
 | `internal/redisx/` | Redis client wrapper with health-check semantics |
+| `internal/clickhouse/` | Optional ClickHouse store + schema for DN42 traffic-sampling analytics (nil when `CLICKHOUSE_URL` is unset) |
 | `internal/cache/` | bbolt-backed persistent cache with an optional Redis layer |
 | `internal/whois/` | WHOIS lookups |
 | `migrations/` | Numbered SQL migrations, auto-applied on startup |
@@ -190,6 +192,19 @@ fallback when it is absent:
 A misconfigured Redis is non-fatal by default; set `REDIS_REQUIRED=true` to make
 startup fail when `REDIS_URL` is set but unreachable. See
 [configuration.md](./configuration.md) for the Redis, asynq, and cache variables.
+
+### ClickHouse (optional)
+
+When `CLICKHOUSE_URL` is set, the center connects to a ClickHouse database
+(`internal/clickhouse/`) and creates two `MergeTree` tables on startup
+(`traffic_samples`, `traffic_top`). This store backs the DN42 traffic-sampling
+analytics: node agents push `traffic.report` messages, the WebSocket hub
+batch-inserts them, and the admin `.../traffic` endpoints query them. A `nil`
+store is the single "feature disabled" signal threaded through the hub (reports
+dropped), the API handlers (`503`), and the admin stats flag (panels hidden). It
+is kept separate from TimescaleDB so the high-write columnar analytics load never
+touches the relational store. Like Redis it is non-fatal by default
+(`CLICKHOUSE_REQUIRED=true` to make startup fail when configured but unreachable).
 
 ## Heartbeats → hypertables
 
@@ -288,6 +303,17 @@ are request/response, correlated by a UUID `id`, with a 30-second timeout.
 - **The Telegram bot** connects to `GET /api/v1/bot/ws` and authenticates with an
   in-band `bot.auth` message carrying a shared bot auth token (no transport-level
   token; an Origin check applies). Bot frames are plaintext JSON.
+- **Flap agents** (`flapalerted-agent`) connect to `GET /api/v1/flap/agent/ws`
+  with an `X-Flap-Token` matching an enabled row in the admin-managed
+  `flap_agents` table, then complete an X25519 `key.init` key exchange (TOFU
+  pubkey pinning, ChaCha20-Poly1305 session) before being registered in a separate
+  `FlapHub` (`internal/ws/flap_hub.go`) keyed by `agent_id`. The relay of flap
+  data itself is **stateless**: center persists no route-flap data. The agent
+  holds all route-flap state in memory; on a hit to a public `/api/v1/flap/*`
+  endpoint the center issues an RPC (`flap.query` / `flap.prefix.query` /
+  `flap.metrics.query`) to the agent, caches the reply for ~3s, and (for the SSE
+  stream) polls every 5s while subscribers are attached. No hypertable or
+  relational writes occur on this path.
 
 The full handshake, frame format, message-type tables, and connection-lifecycle
 details are in [websocket-protocol.md](./websocket-protocol.md).
@@ -302,6 +328,7 @@ jobs on a schedule; otherwise the equivalent in-process schedulers run them.
 | Reconcile | `internal/reconcile/` | Converges each online agent's WireGuard/BIRD state with the database (pushes the authoritative peer list via `peers.sync`). Guarded by the distributed locker so it is safe across replicas. |
 | Latency checker | `internal/latency/` | Periodic RTT checks and latency alerting. |
 | Cleanup | `internal/cleanup/` | Housekeeping / expiry of stale records. |
+| Inactivity sweep | `internal/inactivity/` | Daily sweep that sends mandatory inactivity warnings (email + Telegram, bypassing per-user preferences) at 45/50/60 days and deletes the peer at 60 days. |
 | Queue scheduler | `internal/queue/` | The asynq periodic scheduler that enqueues the recurring jobs above when Redis-backed queuing is enabled. |
 
 ## MCP

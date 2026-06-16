@@ -8,6 +8,7 @@ import (
 	"github.com/akaere/autopeer-center/internal/model"
 	"github.com/akaere/autopeer-center/internal/queue"
 	"github.com/akaere/autopeer-center/internal/repository"
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
 
@@ -50,8 +51,14 @@ func newMCPSessionDB(mcp repository.MCPRepository, q *queue.Queue, logger *logru
 func (s *mcpSessionDB) buildAuditLog(e auditEntry) *model.MCPAuditLog {
 	argsJSON, _ := json.Marshal(e.args)
 	var sessionArg, adminArg, errArg *string
+	// session_id is a UUID column (FK to mcp_sessions). Some callers — notably the
+	// assistant tool path — pass a client conversation id (e.g. "conv_…"), which is
+	// not a session UUID; persisting it raised "invalid input syntax for type uuid"
+	// (22P02) and dropped the audit row. Only store the value when it is a real UUID.
 	if e.sessionID != "" {
-		sessionArg = &e.sessionID
+		if _, err := uuid.Parse(e.sessionID); err == nil {
+			sessionArg = &e.sessionID
+		}
 	}
 	if e.adminID != "" {
 		adminArg = &e.adminID

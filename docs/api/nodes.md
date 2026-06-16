@@ -493,6 +493,49 @@ Clear the node's stored agent public key, forcing a fresh key-exchange handshake
 
 ---
 
+## `GET /api/v1/admin/nodes/{id}/traffic`
+
+Return node-aggregated DN42 traffic-sampling analytics (summed across all of the
+node's peer interfaces, bucketed over time). **Optional feature:** only available
+when the center is configured with a ClickHouse backend (`CLICKHOUSE_URL`);
+otherwise returns `503 traffic_analytics_disabled`. Use the
+`traffic_analytics_enabled` flag from `GET /api/v1/admin/stats` to decide whether
+to call this. Only aggregate counts and Top-N talkers are returned — never packet
+payload.
+
+- **Auth:** Bearer JWT (admin)
+- **Path parameters:**
+
+  | Name | Type | Description |
+  |---|---|---|
+  | `id` | string | Node ID. |
+
+- **Query parameters:**
+
+  | Name | Type | Default | Description |
+  |---|---|---|---|
+  | `hours` | integer | `24` | Look-back window in hours (clamped to `1..168`). |
+  | `top` | integer | `10` | Number of Top-N rows per table (clamped to `1..50`). |
+  | `bucket` | integer | auto (~window/200, min 1) | Aggregation bucket size in minutes (clamped to `1..1440`). |
+
+- **Request body:** None.
+- **Response `200`:** Identical shape to `GET /api/v1/admin/peers/{id}/traffic`
+  (see [peers.md](peers.md)) — `enabled`, `sample_ratio`, `points[]`, and
+  `top_src` / `top_dst` / `top_ports`. Here the series is summed across the
+  node's interfaces and bucketed by `bucket` minutes, and the Top-N tables are
+  node-level.
+
+- **Errors:**
+
+  | Status | `error` code | Condition |
+  |---|---|---|
+  | 503 | `traffic_analytics_disabled` | ClickHouse is not configured. |
+  | 500 | `internal_error` | Failed to fetch traffic analytics. |
+
+- **Source:** `TrafficHandler.NodeTraffic` — `internal/handler/traffic.go`
+
+---
+
 # Agent Releases
 
 Admin endpoints for managing uploaded agent binaries. All require an admin Bearer JWT.

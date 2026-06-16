@@ -181,6 +181,7 @@ Per-resource endpoint pages:
 - [Authentication endpoints](./auth.md) — login, refresh, logout, device, GPG, passkey, and Turnstile flows.
 - [Peers](./peers.md) — user peer lifecycle (list, create, get, update, delete, metrics).
 - [Nodes](./nodes.md) — public node listing.
+- [Flap](./flap.md) — public BGP route-flap monitor endpoints + the flap-agent WebSocket.
 - [Account](./account.md) — devices, email/notification/Telegram preferences, and audit.
 - [MCP](./mcp.md) — MCP key management and the MCP transport endpoints.
 - [Admin](./admin.md) — admin management of peers, nodes, releases, settings, and users.

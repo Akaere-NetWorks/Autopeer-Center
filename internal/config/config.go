@@ -23,6 +23,8 @@ type Config struct {
 	RedisURL               string
 	RedisRequired          bool
 	RedisKeyPrefix         string
+	ClickHouseURL          string
+	ClickHouseRequired     bool
 	AsynqEnabled           bool
 	AsynqConcurrency       int
 	AsynqQueues            string
@@ -69,6 +71,11 @@ type Config struct {
 	WebAuthnOrigin         string
 	ReconcileEnabled       bool
 	ReconcileInterval      time.Duration
+	InactivitySweepEnabled bool
+	InactivityWarnFirstDays  int
+	InactivityWarnSecondDays int
+	InactivityDeleteDays     int
+	InactivityDryRun         bool
 }
 
 // EmailConfig is the subset of configuration consumed by the email service.
@@ -109,6 +116,8 @@ func Load() (*Config, error) {
 		RedisURL:               strings.TrimSpace(getEnv("REDIS_URL", "")),
 		RedisRequired:          getEnvBool("REDIS_REQUIRED", false),
 		RedisKeyPrefix:         getEnv("REDIS_KEY_PREFIX", "autopeer:center:"),
+		ClickHouseURL:          strings.TrimSpace(getEnv("CLICKHOUSE_URL", "")),
+		ClickHouseRequired:     getEnvBool("CLICKHOUSE_REQUIRED", false),
 		AsynqEnabled:           getEnvBool("ASYNQ_ENABLED", true),
 		AsynqConcurrency:       GetEnvInt("ASYNQ_CONCURRENCY", 10),
 		AsynqQueues:            getEnv("ASYNQ_QUEUES", "critical:6,default:3,low:1"),
@@ -150,8 +159,13 @@ func Load() (*Config, error) {
 		TelegramBotUsername:    strings.TrimPrefix(strings.TrimSpace(getEnv("TELEGRAM_BOT_USERNAME", "")), "@"),
 		WebAuthnRPID:           getEnv("WEBAUTHN_RPID", "localhost"),
 		WebAuthnOrigin:         getEnv("WEBAUTHN_ORIGIN", "http://localhost:8080"),
-		ReconcileEnabled:       getEnvBool("RECONCILE_ENABLED", true),
-		ReconcileInterval:      getEnvDuration("RECONCILE_INTERVAL", 10*time.Minute),
+		ReconcileEnabled:           getEnvBool("RECONCILE_ENABLED", true),
+		ReconcileInterval:          getEnvDuration("RECONCILE_INTERVAL", 10*time.Minute),
+		InactivitySweepEnabled:   getEnvBool("INACTIVITY_SWEEP_ENABLED", true),
+		InactivityWarnFirstDays:  GetEnvInt("INACTIVITY_WARN_FIRST_DAYS", 45),
+		InactivityWarnSecondDays: GetEnvInt("INACTIVITY_WARN_SECOND_DAYS", 50),
+		InactivityDeleteDays:     GetEnvInt("INACTIVITY_DELETE_DAYS", 60),
+		InactivityDryRun:         getEnvBool("INACTIVITY_DRY_RUN", false),
 	}
 
 	log.WithFields(logrus.Fields{

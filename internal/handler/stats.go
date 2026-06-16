@@ -10,11 +10,18 @@ import (
 var statsLog = logrus.WithField("pkg", "handler.stats")
 
 type StatsHandler struct {
-	stats repository.StatsRepository
+	stats          repository.StatsRepository
+	trafficEnabled bool
 }
 
 func NewStatsHandler(stats repository.StatsRepository) *StatsHandler {
 	return &StatsHandler{stats: stats}
+}
+
+// SetTrafficEnabled records whether the traffic-analytics feature is active, so
+// the admin stats response can tell the frontend whether to render the panel.
+func (h *StatsHandler) SetTrafficEnabled(enabled bool) {
+	h.trafficEnabled = enabled
 }
 
 func (h *StatsHandler) Public(w http.ResponseWriter, r *http.Request) {
@@ -94,12 +101,13 @@ func (h *StatsHandler) Admin(w http.ResponseWriter, r *http.Request) {
 	}).Debug("Admin stats fetched")
 
 	JSON(w, http.StatusOK, map[string]any{
-		"peers_active":    adm.ActivePeers,
-		"peers_pending":   adm.PendingPeers,
-		"peers_suspended": adm.SuspendedPeers,
-		"peers_rejected":  adm.RejectedPeers,
-		"nodes_online":    adm.OnlineNodes,
-		"nodes_total":     adm.TotalNodes,
-		"new_today":       adm.PeersLast24h,
+		"peers_active":              adm.ActivePeers,
+		"peers_pending":             adm.PendingPeers,
+		"peers_suspended":           adm.SuspendedPeers,
+		"peers_rejected":            adm.RejectedPeers,
+		"nodes_online":              adm.OnlineNodes,
+		"nodes_total":               adm.TotalNodes,
+		"new_today":                 adm.PeersLast24h,
+		"traffic_analytics_enabled": h.trafficEnabled,
 	})
 }

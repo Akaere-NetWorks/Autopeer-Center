@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"os/signal"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/akaere/autopeer-center/internal/cache"
 	"github.com/akaere/autopeer-center/internal/cleanup"
+	"github.com/akaere/autopeer-center/internal/clickhouse"
 	"github.com/akaere/autopeer-center/internal/config"
 	"github.com/akaere/autopeer-center/internal/crypto"
 	"github.com/akaere/autopeer-center/internal/database"
@@ -18,6 +20,7 @@ import (
 	"github.com/akaere/autopeer-center/internal/reconcile"
 	"github.com/akaere/autopeer-center/internal/repository"
 	"github.com/akaere/autopeer-center/internal/redisx"
+	chdriver "github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/getsentry/sentry-go"
 	sentryhttp "github.com/getsentry/sentry-go/http"
 	"github.com/go-chi/chi/v5"
@@ -115,6 +118,30 @@ func main() {
 	}
 	defer c.Close()
 
+	// ── ClickHouse (optional: traffic analytics) ──────────────────────────────
+	// Mirrors the optional-Redis pattern: unset → feature disabled; configured
+	// but unreachable → fatal when CLICKHOUSE_REQUIRED, else warn-and-disable.
+	var chConn chdriver.Conn
+	if cfg.ClickHouseURL == "" {
+		log.Info("traffic analytics disabled (CLICKHOUSE_URL unset)")
+	} else if chConn, err = clickhouse.Connect(ctx, cfg.ClickHouseURL); err != nil {
+		if cfg.ClickHouseRequired {
+			log.WithError(err).Fatal("failed to connect to required clickhouse")
+		}
+		log.WithError(err).Warn("clickhouse unavailable, traffic analytics disabled")
+		chConn = nil
+	} else if err = clickhouse.EnsureSchema(ctx, chConn); err != nil {
+		if cfg.ClickHouseRequired {
+			log.WithError(err).Fatal("failed to ensure required clickhouse schema")
+		}
+		log.WithError(err).Warn("clickhouse schema setup failed, traffic analytics disabled")
+		_ = chConn.Close()
+		chConn = nil
+	}
+	if chConn != nil {
+		defer chConn.Close()
+	}
+
 	// ── Center key pair ───────────────────────────────────────────────────────
 	centerKP, err := loadOrGenerateCenterKeyPair(cfg.CenterKeyPath)
 	if err != nil {
@@ -123,7 +150,7 @@ func main() {
 	log.WithField("pubkey_prefix", crypto.PubKeyHex(centerKP.PublicKey)[:16]).Info("center key pair ready")
 
 	// ── Dependency wiring ─────────────────────────────────────────────────────
-	deps, err := BuildDeps(ctx, cfg, db, bunDB, redisClient, c, locker, centerKP)
+	deps, err := BuildDeps(ctx, cfg, db, bunDB, redisClient, c, locker, centerKP, chConn)
 	if err != nil {
 		log.WithError(err).Fatal("failed to initialize dependencies")
 	}
@@ -165,6 +192,15 @@ func main() {
 		goWithSentry("endpoint_checker", func() {
 			deps.EndpointChecker.Run(epCtx)
 		})
+
+		if deps.Cfg.InactivitySweepEnabled {
+			inactCtx, inactCancel := context.WithCancel(ctx)
+			defer inactCancel()
+			goWithSentry("inactivity_sweep", func() {
+				deps.InactivityWorker.Run(inactCtx)
+			})
+		}
+
 	}
 
 	// ── Reconcile worker ──────────────────────────────────────────────────────
@@ -216,11 +252,20 @@ func main() {
 	log.Info("shutting down")
 
 	deps.Hub.Shutdown()
+	deps.FlapHub.Shutdown()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		sentry.CaptureException(err)
-		log.WithError(err).Warn("server shutdown failed")
+		if errors.Is(err, context.DeadlineExceeded) {
+			// Long-lived SSE/stream connections (flap/atlas/MCP) don't drain within
+			// the grace period; force them closed. This is expected on shutdown, not
+			// an error condition — don't report it to Sentry.
+			log.Warn("graceful shutdown deadline exceeded; forcing connection close")
+			_ = srv.Close()
+		} else {
+			sentry.CaptureException(err)
+			log.WithError(err).Warn("server shutdown failed")
+		}
 	}
 	if deps.Inspector != nil {
 		deps.Inspector.Close()

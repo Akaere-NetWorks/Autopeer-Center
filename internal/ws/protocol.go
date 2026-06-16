@@ -7,6 +7,7 @@ const (
 	TypeStatusRequest = "status.request"
 	TypeResponse      = "response"
 	TypeHeartbeat     = "heartbeat"
+	TypeTrafficReport = "traffic.report"
 	TypeStatusResp    = "status.response"
 	TypePeersSync     = "peers.sync"
 	TypePeersImport   = "peers.import"
@@ -64,6 +65,8 @@ const (
 	TypeBotUserPeerDeleteResult  = "bot.user_peer_delete_result"
 	TypeBotUserPeerMetrics       = "bot.user_peer_metrics"
 	TypeBotUserPeerMetricsResult = "bot.user_peer_metrics_result"
+	TypeBotUserPeerUpdate        = "bot.user_peer_update"
+	TypeBotUserPeerUpdateResult  = "bot.user_peer_update_result"
 
 	TypeBotAdminPeers            = "bot.admin_peers"
 	TypeBotAdminPeersResult      = "bot.admin_peers_result"
@@ -71,6 +74,8 @@ const (
 	TypeBotAdminPeerActionResult = "bot.admin_peer_action_result"
 	TypeBotAdminNodes            = "bot.admin_nodes"
 	TypeBotAdminNodesResult      = "bot.admin_nodes_result"
+	TypeBotAdminPeerDetail       = "bot.admin_peer_detail"
+	TypeBotAdminPeerDetailResult = "bot.admin_peer_detail_result"
 	TypeBotAdminNodeDetail       = "bot.admin_node_detail"
 	TypeBotAdminNodeDetailResult = "bot.admin_node_detail_result"
 	TypeBotAdminNodeUpdate       = "bot.admin_node_update"
@@ -440,6 +445,31 @@ type BotPeerMetricPt struct {
 	BGPState string   `json:"bgp_state"`
 	RxBytes  int64    `json:"rx_bytes"`
 	TxBytes  int64    `json:"tx_bytes"`
+}
+
+type BotUserPeerUpdatePayload struct {
+	TgUserID       int64   `json:"tg_user_id"`
+	PeerID         string  `json:"peer_id"`
+	RemotePubkey   *string `json:"remote_pubkey,omitempty"`
+	RemoteEndpoint *string `json:"remote_endpoint,omitempty"`
+	RemoteLLA      *string `json:"remote_lla,omitempty"`
+	MTU            *int    `json:"mtu,omitempty"`
+	MTUSet         bool    `json:"mtu_set,omitempty"`
+}
+
+type BotUserPeerUpdateResultPayload struct {
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+type BotAdminPeerDetailPayload struct {
+	PeerID string `json:"peer_id"`
+}
+
+type BotAdminPeerDetailResultPayload struct {
+	Found bool              `json:"found"`
+	Peer  *BotAdminPeerInfo `json:"peer,omitempty"`
+	Error string            `json:"error,omitempty"`
 }
 
 type BotAdminPeersPayload struct {

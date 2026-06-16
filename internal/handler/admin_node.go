@@ -159,6 +159,7 @@ func (h *AdminHandler) CreateNode(w http.ResponseWriter, r *http.Request) {
 		BirdPeerDir:  req.BirdPeerDir,
 		WgDir:        req.WgDir,
 		WgPortPrefix: req.WgPortPrefix,
+		Enabled:      true,
 	}
 	if err := h.nodes.Create(ctx, node); err != nil {
 		ErrorJSON(w, r, http.StatusInternalServerError, "internal_error", "Failed to create node")

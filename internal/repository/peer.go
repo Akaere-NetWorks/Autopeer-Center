@@ -26,6 +26,7 @@ type PeerRepository interface {
 	UpdateContactEmail(ctx context.Context, id, email string) error
 	Delete(ctx context.Context, id string) error
 	ExistsByNodeAndASN(ctx context.Context, nodeID string, asn int64) (bool, error)
+	ResolvePeerIDByNodeAndASN(ctx context.Context, nodeID string, asn int64) (string, error)
 	ExistsByNodeAndPort(ctx context.Context, nodeID string, port int) (bool, error)
 	CountPendingByASN(ctx context.Context, asn int64) (int, error)
 	ImportPeer(ctx context.Context, p *model.Peer) (string, error)
@@ -35,6 +36,14 @@ type PeerRepository interface {
 	SetEndpointMismatchSince(ctx context.Context, peerID string, since *time.Time) error
 	SetBGPSuspendedByEndpoint(ctx context.Context, peerID string, suspended bool) error
 	ListPeersSuspendedByEndpoint(ctx context.Context) ([]PeerEndpointCheck, error)
+	ListInactiveActivePeers(ctx context.Context) ([]InactivePeer, error)
+	MarkPeersActive(ctx context.Context, peerIDs []string, at time.Time) error
+	SetInactivityWarningStage(ctx context.Context, peerID string, stage int) error
+	// DeleteInactive deletes a peer only if it is still at the final inactivity
+	// warning stage (3). It returns deleted=false (no error) when the peer was
+	// re-activated (MarkPeersActive resets the stage to 0) between the sweep
+	// snapshot and the delete, so callers can avoid tearing down a live tunnel.
+	DeleteInactive(ctx context.Context, peerID string) (bool, error)
 }
 
 // flatPeerBase holds all peer columns explicitly so bun can map by column name
@@ -58,8 +67,10 @@ type flatPeerBase struct {
 	UpdatedAt          time.Time `bun:"updated_at"`
 	MTU                *int      `bun:"mtu"`
 	WgPreSharedKey     *string   `bun:"wg_preshared_key"`
-	BgpProtoName       string    `bun:"bgp_proto_name"`
-	BirdConfigFilename string    `bun:"bird_config_filename"`
+	BgpProtoName            string    `bun:"bgp_proto_name"`
+	BirdConfigFilename      string    `bun:"bird_config_filename"`
+	LastActiveAt            *time.Time `bun:"last_active_at"`
+	InactivityWarningStage  int        `bun:"inactivity_warning_stage"`
 }
 
 func (f flatPeerBase) ToPeer() model.Peer {
@@ -82,8 +93,10 @@ func (f flatPeerBase) ToPeer() model.Peer {
 		UpdatedAt:          f.UpdatedAt,
 		MTU:                f.MTU,
 		WgPreSharedKey:     f.WgPreSharedKey,
-		BgpProtoName:       f.BgpProtoName,
-		BirdConfigFilename: f.BirdConfigFilename,
+		BgpProtoName:            f.BgpProtoName,
+		BirdConfigFilename:      f.BirdConfigFilename,
+		LastActiveAt:            f.LastActiveAt,
+		InactivityWarningStage:  f.InactivityWarningStage,
 	}
 }
 
@@ -155,6 +168,16 @@ type PeerEndpointCheck struct {
 	BGPSuspendedByEndpoint bool
 }
 
+type InactivePeer struct {
+	PeerID       string  `bun:"peer_id"`
+	NodeID       string  `bun:"node_id"`
+	RemoteASN    int64   `bun:"remote_asn"`
+	ContactEmail string  `bun:"contact_email"`
+	Stage        int     `bun:"stage"`
+	NodeName     string  `bun:"node_name"`
+	DaysInactive float64 `bun:"days_inactive"`
+}
+
 type bunPeerRepository struct {
 	baseRepo
 }
@@ -179,6 +202,7 @@ func (r *bunPeerRepository) GetByIDWithNode(ctx context.Context, id string) (*Pe
 		       p.contact_email, p.wg_listen_port, p.wg_interface_name, p.wg_managed, p.status, p.reject_reason,
 		       p.endpoint_mismatch_since, p.bgp_suspended_by_endpoint,
 		       p.created_at, p.updated_at, p.mtu, p.wg_preshared_key, p.bgp_proto_name, p.bird_config_filename,
+		       p.last_active_at, p.inactivity_warning_stage,
 		       n.name AS node_name, n.location AS node_location
 		FROM peers p JOIN nodes n ON p.node_id = n.id
 		WHERE p.id = ?`, id,
@@ -205,6 +229,7 @@ func (r *bunPeerRepository) GetByIDAndASNWithNode(ctx context.Context, id string
 		       p.contact_email, p.wg_listen_port, p.wg_interface_name, p.wg_managed, p.status, p.reject_reason,
 		       p.endpoint_mismatch_since, p.bgp_suspended_by_endpoint,
 		       p.created_at, p.updated_at, p.mtu, p.wg_preshared_key, p.bgp_proto_name, p.bird_config_filename,
+		       p.last_active_at, p.inactivity_warning_stage,
 		       n.name AS node_name, n.location AS node_location,
 		       n.public_ip AS node_public_ip, n.our_lla AS node_our_lla, n.our_wg_pubkey AS node_our_wg_pubkey
 		FROM peers p JOIN nodes n ON p.node_id = n.id
@@ -223,6 +248,7 @@ func (r *bunPeerRepository) ListByASN(ctx context.Context, asn int64) ([]*PeerLi
 		       p.contact_email, p.wg_listen_port, p.wg_interface_name, p.wg_managed, p.status, p.reject_reason,
 		       p.endpoint_mismatch_since, p.bgp_suspended_by_endpoint,
 		       p.created_at, p.updated_at, p.mtu, p.wg_preshared_key, p.bgp_proto_name, p.bird_config_filename,
+		       p.last_active_at, p.inactivity_warning_stage,
 		       n.name AS node_name, n.location AS node_location
 		FROM peers p JOIN nodes n ON p.node_id = n.id
 		WHERE p.remote_asn = ? ORDER BY p.created_at DESC`, asn,
@@ -283,6 +309,7 @@ func (r *bunPeerRepository) List(ctx context.Context, params ListParams) ([]*Adm
 	dataQuery := `SELECT p.id, p.node_id, p.remote_asn, p.remote_pubkey, p.remote_endpoint, p.remote_lla,
 	                     p.contact_email, p.wg_listen_port, p.wg_interface_name, p.wg_managed, p.status, p.reject_reason,
 	                     p.created_at, p.updated_at, p.mtu, p.wg_preshared_key, p.bgp_proto_name, p.bird_config_filename,
+	                     p.last_active_at, p.inactivity_warning_stage,
 	                     p.endpoint_mismatch_since, p.bgp_suspended_by_endpoint,
 	                     n.name AS node_name, n.location AS node_location,
 	                     pm_latest.rtt_ms, pm_latest.bgp_state,
@@ -374,6 +401,27 @@ func (r *bunPeerRepository) ExistsByNodeAndASN(ctx context.Context, nodeID strin
 		Model((*model.Peer)(nil)).
 		Where("node_id = ? AND remote_asn = ?", nodeID, asn).
 		Exists(ctx)
+}
+
+// ResolvePeerIDByNodeAndASN maps an authenticated (node_id, remote_asn) to its
+// peers.id via the (node_id, remote_asn) unique constraint. Returns "" (no error)
+// when no peer matches — e.g. the peer was deleted but a sample is still in
+// flight, in which case the analytics row is retained under the node only.
+func (r *bunPeerRepository) ResolvePeerIDByNodeAndASN(ctx context.Context, nodeID string, asn int64) (string, error) {
+	var id string
+	err := r.db.NewSelect().
+		Model((*model.Peer)(nil)).
+		Column("id").
+		Where("node_id = ? AND remote_asn = ?", nodeID, asn).
+		Limit(1).
+		Scan(ctx, &id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
+	}
+	return id, nil
 }
 
 func (r *bunPeerRepository) ExistsByNodeAndPort(ctx context.Context, nodeID string, port int) (bool, error) {
@@ -556,4 +604,54 @@ func (r *bunPeerRepository) ListPeersSuspendedByEndpoint(ctx context.Context) ([
 		ORDER BY p.id
 	`).Scan(ctx, &results)
 	return results, err
+}
+
+func (r *bunPeerRepository) ListInactiveActivePeers(ctx context.Context) ([]InactivePeer, error) {
+	var results []InactivePeer
+	err := r.db.NewRaw(`
+		SELECT p.id AS peer_id, p.node_id, p.remote_asn, p.contact_email,
+		       p.inactivity_warning_stage AS stage,
+		       n.name AS node_name,
+		       EXTRACT(EPOCH FROM (now() - COALESCE(p.last_active_at, p.updated_at))) / 86400.0 AS days_inactive
+		FROM peers p JOIN nodes n ON n.id = p.node_id
+		WHERE p.status = 'active'
+		ORDER BY days_inactive DESC
+	`).Scan(ctx, &results)
+	return results, err
+}
+
+func (r *bunPeerRepository) MarkPeersActive(ctx context.Context, peerIDs []string, at time.Time) error {
+	if len(peerIDs) == 0 {
+		return nil
+	}
+	_, err := r.db.NewRaw(
+		"UPDATE peers SET last_active_at = ?, inactivity_warning_stage = 0 WHERE id IN (?)",
+		at, bun.In(peerIDs),
+	).Exec(ctx)
+	return err
+}
+
+func (r *bunPeerRepository) SetInactivityWarningStage(ctx context.Context, peerID string, stage int) error {
+	_, err := r.db.NewUpdate().
+		Model((*model.Peer)(nil)).
+		Set("inactivity_warning_stage = ?", stage).
+		Where("id = ?", peerID).
+		Exec(ctx)
+	return err
+}
+
+func (r *bunPeerRepository) DeleteInactive(ctx context.Context, peerID string) (bool, error) {
+	res, err := r.db.NewDelete().
+		Model((*model.Peer)(nil)).
+		Where("id = ?", peerID).
+		Where("inactivity_warning_stage = ?", 3).
+		Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }

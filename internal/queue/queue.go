@@ -24,6 +24,7 @@ const (
 	TypeLatencyCheckAll   = "latency:check_all"
 	TypeLatencyCheckPeer  = "latency:check_peer"
 	TypeEndpointCheckAll  = "endpoint:check_all"
+	TypeInactivitySweep   = "inactivity:sweep"
 )
 
 var log = logrus.WithField("pkg", "queue")
@@ -224,6 +225,7 @@ type LatencyCheckAllFn func(ctx context.Context, q *Queue) error
 type LatencyCheckPeerFn func(ctx context.Context, payload []byte) error
 
 type EndpointCheckAllFn func(ctx context.Context) error
+type InactivitySweepFn func(ctx context.Context) error
 
 func (q *Queue) RegisterEndpointCheckHandler(checkAllFn EndpointCheckAllFn) {
 	if !q.Enabled() || q.mux == nil {
@@ -231,6 +233,15 @@ func (q *Queue) RegisterEndpointCheckHandler(checkAllFn EndpointCheckAllFn) {
 	}
 	q.mux.HandleFunc(TypeEndpointCheckAll, func(ctx context.Context, task *asynq.Task) error {
 		return checkAllFn(ctx)
+	})
+}
+
+func (q *Queue) RegisterInactivityHandler(sweepFn InactivitySweepFn) {
+	if !q.Enabled() || q.mux == nil {
+		return
+	}
+	q.mux.HandleFunc(TypeInactivitySweep, func(ctx context.Context, task *asynq.Task) error {
+		return sweepFn(ctx)
 	})
 }
 
@@ -279,6 +290,7 @@ func (q *Queue) RegisterPeriodicTasks() {
 		{"@every 30s", TypeCleanupTimeout, nil, "default", 10 * time.Second, 24 * time.Hour},
 		{"@every 1m", TypeLatencyCheckAll, nil, "default", 60 * time.Second, 24 * time.Hour},
 		{"@every 15m", TypeEndpointCheckAll, nil, "default", 60 * time.Second, 24 * time.Hour},
+		{"@daily", TypeInactivitySweep, nil, "default", 300 * time.Second, 24 * time.Hour},
 	}
 
 	for _, pt := range tasks {
@@ -311,6 +323,7 @@ func (q *Queue) EnqueueInitialTick() {
 		{TypeCleanupTimeout, "default", 10 * time.Second, 24 * time.Hour},
 		{TypeLatencyCheckAll, "default", 60 * time.Second, 24 * time.Hour},
 		{TypeEndpointCheckAll, "default", 60 * time.Second, 24 * time.Hour},
+		{TypeInactivitySweep, "default", 300 * time.Second, 24 * time.Hour},
 	}
 	for _, t := range initialTasks {
 		opts := []asynq.Option{asynq.MaxRetry(1), asynq.Timeout(t.timeout)}

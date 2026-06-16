@@ -1,11 +1,12 @@
 # WebSocket Protocol
 
-AutoPeer Center talks to two kinds of long-lived WebSocket clients:
+AutoPeer Center talks to three kinds of long-lived WebSocket clients:
 
 - **Agents** — one process per physical node, connected to `GET /api/v1/agent/ws`. Agents install/tear down WireGuard + BIRD config and stream telemetry.
 - **Bots** — a chat/diagnostics frontend connected to `GET /api/v1/bot/ws`. Bots issue diagnostics, manage user bindings, and perform user/admin peer operations on behalf of chat users.
+- **Flap agents** — a `flapalerted-agent` BGP route-flap detector connected to `GET /api/v1/flap/agent/ws`. The agent holds all flap state in memory; center pulls it on demand and relays it to the public flap endpoints.
 
-Both endpoints share a single `Hub` (`internal/ws/hub.go`) that tracks live connections — agents keyed by `node_id`, bots keyed by a generated connection ID.
+The agent and bot endpoints share a single `Hub` (`internal/ws/hub.go`) — agents keyed by `node_id`, bots keyed by a generated connection ID. Flap agents use a separate `FlapHub` (`internal/ws/flap_hub.go`) keyed by `agent_id`.
 
 For the HTTP API that sits in front of these endpoints, see [`./api/README.md`](./api/README.md).
 
@@ -136,6 +137,7 @@ All constants are in `internal/ws/protocol.go`.
 | `response` | echoed `id` + `success` (+ `error`/`payload`) | Reply to a center command; matched by `id`. |
 | `status.response` | — | Reply to `status.request`; also routed by `id`. |
 | `heartbeat` | `HeartbeatPayload` | Periodic telemetry (see below). |
+| `traffic.report` | per-window sampling analytics | Optional DN42 packet-sampling analytics, one message per window per chunk of interfaces. Persisted to ClickHouse when configured; **dropped immediately when ClickHouse is not configured** (`h.traffic == nil`). Carries `node_id`, `window_start/end`, `sample_ratio`, and an `interfaces[]` array (per-ASN sampled byte/packet counts, v4/v6 split, fixed `proto` map, 8-bucket size histogram, and Top-N source/dest/port tables). Headers only — never payload. |
 | `agent.updating` | — | Agent announces it is updating; the node is marked `updating` and offline-notify is suppressed for the window. |
 
 #### Bidirectional
@@ -169,6 +171,18 @@ The center writes telemetry to two TimescaleDB hypertables:
 - **`node_metrics`** — node-level runtime stats (`InsertNodeMetric`): memory, goroutine count, uptime.
 
 A heartbeat also: updates the node's reported `agent_version` (and sends an admin notification on version change), marks the node back-online if it had been flagged offline, and runs per-peer alerting (BGP-down, BGP-recovered, stale-handshake) gated by operator settings and notification preferences.
+
+### Traffic report → ClickHouse
+
+`handleTrafficReport` (`internal/ws/traffic.go`) processes each `traffic.report`,
+but only when a ClickHouse store is configured — otherwise it returns
+immediately and the report is discarded. For each interface it resolves the
+authenticated `(node_id, asn)` to a `peers.id` (cached briefly to avoid hitting
+Postgres per row) and batch-inserts into two ClickHouse MergeTree tables:
+`traffic_samples` (one row per interface per window: scalar counters plus
+protocol/size `Map` columns) and `traffic_top` (one row per Top-N entry). The
+authenticated connection's `node_id` is authoritative; the payload's own
+`node_id` is ignored. See [database.md](database.md) for the table schemas.
 
 ---
 
@@ -236,12 +250,14 @@ Diagnostic targets must be public IP addresses; loopback, link-local, private (R
 | `bot.user_peer_create` | `bot.user_peer_create_result` | Request a new peer. |
 | `bot.user_peer_delete` | `bot.user_peer_delete_result` | Delete a peer. |
 | `bot.user_peer_metrics` | `bot.user_peer_metrics_result` | Recent metric points for a peer. |
+| `bot.user_peer_update` | `bot.user_peer_update_result` | Edit a user's own peer (pubkey, endpoint, LLA, MTU). Active peers are reconfigured on the agent with rollback on failure. |
 
 **Admin operations** — privileged fleet management:
 
 | Request | Result | Summary |
 |---|---|---|
 | `bot.admin_peers` | `bot.admin_peers_result` | Paginated peer list (optionally by status). |
+| `bot.admin_peer_detail` | `bot.admin_peer_detail_result` | Fetch full detail for a single peer by ID. |
 | `bot.admin_peer_action` | `bot.admin_peer_action_result` | Approve / reject / suspend / etc. a peer. |
 | `bot.admin_nodes` | `bot.admin_nodes_result` | List all nodes with agent state/version. |
 | `bot.admin_node_detail` | `bot.admin_node_detail_result` | Detail for one node. |
@@ -250,15 +266,64 @@ Diagnostic targets must be public IP addresses; loopback, link-local, private (R
 
 ---
 
+## Flap agent endpoint — `/api/v1/flap/agent/ws`
+
+A `flapalerted-agent` connects as a WebSocket **client**; center is the server.
+The agent passively peers BGP, detects route flaps, and holds all state in
+memory. Center never persists flap data — it issues a request/response RPC to the
+connected agent whenever a public flap endpoint is hit, caches the reply for ~3s,
+and polls every 5s while there are SSE subscribers. Handled by `FlapConn` /
+`FlapHub` (`internal/ws/flap_conn.go`, `flap_hub.go`) and `FlapHandler`
+(`internal/handler/flap.go`).
+
+### Transport auth at upgrade
+
+The agent sends an `X-Flap-Token` header matching an enabled row in the
+`flap_agents` table (admin-managed; see [configuration.md](./configuration.md)
+and [database.md](./database.md)). The token resolves to the agent id; a
+client-supplied `X-Flap-Agent-ID` / `?agent_id=` must equal it.
+
+### App-layer key exchange (required)
+
+The token only bootstraps the connection; like the node agent, the flap agent
+must then complete an X25519 key exchange before it is trusted and becomes
+queryable. On connect the agent sends `key.init` with its public key; center
+pins it on first connect (TOFU) in `flap_agents.agent_pubkey`, rejects a changed
+key with `key.init_ack { error: "reset_required" }` (cleared by an admin via
+`POST /api/v1/admin/flap/agents/{id}/reset-pubkey`), and otherwise replies with
+`key.init_ack { pubkey, nonce }`. Both sides derive a ChaCha20-Poly1305 session
+key; all subsequent frames are binary-encrypted. Until the exchange completes the
+connection is *not* registered in the `FlapHub`, so the public `/api/v1/flap/*`
+endpoints do not see it. A new connection for an existing id replaces the old one.
+
+### Flap message types
+
+Request/response are correlated by the `id` field, like the agent endpoint. The
+agent answers each `*.query` with the matching reply type.
+
+| center → agent | agent → center | Purpose |
+|---|---|---|
+| — | `key.init` | Sent by the agent first: `{ pubkey }`. Center pins it (TOFU) and replies with `key.init_ack`. |
+| `key.init_ack` | — | `{ pubkey, nonce }` (or `{ error: "reset_required" }`). Enables encryption. |
+| — | `flap.register` | Sent by the agent on connect (after key exchange): `{ agent_id, capabilities }`. Updates the hub's view of the agent's detector config and last-seen time. |
+| `flap.query` | `flap.snapshot` | Full snapshot (metric, stat series, active flaps, peers, sessions). |
+| `flap.prefix.query` | `flap.prefix` | Per-prefix AS-path change history for `{ prefix }`. |
+| `flap.metrics.query` | `flap.metrics` | Headline gauge metric only. |
+
+Payload shapes are documented in [api/flap.md](./api/flap.md) (the public
+endpoints return them verbatim).
+
+---
+
 ## Connection lifecycle summary
 
-| | Agent | Bot |
-|---|---|---|
-| Endpoint | `GET /api/v1/agent/ws` | `GET /api/v1/bot/ws` |
-| Transport auth | `X-Agent-Token`, or key-auth (`X-Node-ID` / `?node_id=`, rate-limited) | none (Origin check only) |
-| App-layer auth | X25519 + ChaCha20-Poly1305 handshake (`key.init`…`key.auth_ack`) | in-band `bot.auth` → `bot.auth_ack` |
-| Encrypted frames | yes (binary, after handshake) | no (plaintext JSON) |
-| Read deadline | 90s (ping/pong every 30s) | 5s pre-auth, then 120s (ping/pong every 30s) |
-| Keyed by | `node_id` | generated connection ID |
+| | Agent | Bot | Flap agent |
+|---|---|---|---|
+| Endpoint | `GET /api/v1/agent/ws` | `GET /api/v1/bot/ws` | `GET /api/v1/flap/agent/ws` |
+| Transport auth | `X-Agent-Token`, or key-auth (`X-Node-ID` / `?node_id=`, rate-limited) | none (Origin check only) | `X-Flap-Token` (DB allowlist) |
+| App-layer auth | X25519 + ChaCha20-Poly1305 handshake (`key.init`…`key.auth_ack`) | in-band `bot.auth` → `bot.auth_ack` | X25519 + ChaCha20-Poly1305 (`key.init` → `key.init_ack`, TOFU) |
+| Encrypted frames | yes (binary, after handshake) | no (plaintext JSON) | yes (binary, after key exchange) |
+| Read deadline | 90s (ping/pong every 30s) | 5s pre-auth, then 120s (ping/pong every 30s) | 90s (ping/pong every 30s) |
+| Keyed by | `node_id` | generated connection ID | `agent_id` |
 
 For HTTP endpoints, peer lifecycle, and configuration, see [`./api/README.md`](./api/README.md).

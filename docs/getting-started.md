@@ -153,3 +153,13 @@ for the login flow and [`./api/README.md`](./api/README.md) for the endpoints.
   and WebSocket hubs fit together.
 - [`./api/README.md`](./api/README.md) — the HTTP API reference. Since the
   frontend is not open-source, this is the only interface to the center.
+
+### Optional: traffic analytics (ClickHouse)
+
+DN42 traffic-sampling analytics are off by default. To enable them, run a
+ClickHouse instance (the bundled `docker-compose.yml` ships an optional
+`clickhouse` service) and set `CLICKHOUSE_URL` (see
+[`./configuration.md`](./configuration.md#clickhouse-traffic-analytics)). The
+center creates its analytics tables on startup. The matching node agents must
+also have `sampling.enabled` set. Leave `CLICKHOUSE_URL` empty to run without it
+— the center degrades gracefully and the feature stays hidden.

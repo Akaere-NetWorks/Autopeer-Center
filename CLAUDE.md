@@ -119,6 +119,7 @@ is the agent registered in the hub. See `internal/crypto/` for primitives
 - `peer.add` / `peer.remove` — center → agent (install/teardown WireGuard + BIRD config)
 - `response` — agent → center (ack with `success` bool)
 - `heartbeat` — agent → center (periodic metrics: WG bytes, BGP state, RTT, BGP routes)
+- `traffic.report` — agent → center (optional DN42 packet-sampling analytics; persisted to ClickHouse when configured, dropped otherwise)
 - `peers.sync` — bidirectional: agent requests full list of active peers for its node; center responds with the full list
 - `agent.update` / `agent.rollback` — center → agent (binary update/rollback via `AGENT_RELEASE_DIR`)
 - `bird.details` / `peers.import` / `status.request` — admin/diagnostic operations
@@ -127,6 +128,8 @@ is the agent registered in the hub. See `internal/crypto/` for primitives
 
 Heartbeat data is written directly to the `peer_metrics` TimescaleDB hypertable.
 Node-level metrics (goroutines, memory) go to the `node_metrics` hypertable.
+Optional `traffic.report` analytics go to ClickHouse (`internal/clickhouse/`)
+when `CLICKHOUSE_URL` is configured; otherwise they are dropped on arrival.
 
 ### Authentication
 
@@ -169,6 +172,7 @@ The two required variables are below; the full table lives in
 | `CORS_ORIGIN` | no | Allowed CORS origin |
 | `EXTERNAL_URL` | no | Public URL used in download links; default `http://localhost:8080` |
 | `REDIS_URL` | no | Redis URL for shared cache, locks, and asynq queues |
+| `CLICKHOUSE_URL` | no | ClickHouse DSN for optional DN42 traffic-sampling analytics; empty disables the feature |
 | `CENTER_KEY_PATH` | no | Persistent ECDH key pair path |
 | `AGENT_RELEASE_DIR` | no | Directory for OTA agent binaries |
 
@@ -191,6 +195,7 @@ Sentry, Turnstile, WebAuthn, reconcile, token-TTL, and all other variables.
 - `internal/crypto/` — ECDH X25519 + ChaCha20-Poly1305 primitives
 - `internal/cache/` — bbolt-backed persistent cache (optional Redis layer)
 - `internal/redisx/` — Redis client wrapper
+- `internal/clickhouse/` — optional ClickHouse store + schema for DN42 traffic-sampling analytics
 - `internal/lock/` — distributed locking (Redis-backed or process-local)
 - `internal/queue/` — asynq job queue (Redis-backed async workers)
 - `internal/latency/` — RTT checker and alerting worker

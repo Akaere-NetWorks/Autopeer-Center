@@ -133,9 +133,10 @@ files in `migrations/`.
 |---|---|
 | `admins` | Admin accounts (email, password hash). The initial admin is upserted from env on startup. |
 | `nodes` | Physical peering nodes: name, location, public IP, the node's own ASN and link-local address, WireGuard public key, BIRD/WireGuard config directories, online/enabled flags, and agent metadata. |
-| `peers` | Peering sessions: owning `node_id`, remote ASN, remote WireGuard pubkey/endpoint/link-local, contact email, computed WireGuard listen port and interface name, status (`pending` / `active` / `rejected` / `suspended`), and reject reason. |
+| `peers` | Peering sessions: owning `node_id`, remote ASN, remote WireGuard pubkey/endpoint/link-local, contact email, computed WireGuard listen port and interface name, status (`pending` / `active` / `rejected` / `suspended`), reject reason, plus inactivity tracking columns (`last_active_at` updated on each heartbeat with a recent handshake, `inactivity_warning_stage` tracking which warning was last sent). An active-only partial index on `last_active_at` supports the inactivity sweep query. |
 | `audit_logs` | Append-only audit trail of admin/user actions (action, operator, target, JSONB detail, timestamp). |
 | `agent_releases` | Uploaded `autopeer-agent` binaries available for agent update/rollback. |
+| `flap_agents` | Allowlist of `flapalerted-agent` route-flap detectors (admin-managed): `agent_id`, name/description, bearer `token`, TOFU-pinned `agent_pubkey`, `enabled` flag, advertised `version`, and `last_seen_at`. Replaces the former `FLAP_AGENT_TOKENS` / `FLAP_AGENT_PUBKEYS` env allowlist. |
 | `auth_sessions` / device & passkey tables | Authentication state: refresh sessions, device grants, WebAuthn/passkey credentials and challenges. |
 | `site_settings` / `bot_settings` / notification settings | Operator-configurable runtime settings and notification preferences. |
 
@@ -151,6 +152,28 @@ files in `migrations/`.
 | `peer_metrics` | Created via `create_hypertable('peer_metrics', 'time')`. Stores per-peer counters from agent heartbeats (rx/tx bytes, uptime, BGP state, RTT, BGP route counts, last handshake). Compressed (segment by `peer_id`, order by `time DESC`) and pruned by a retention policy. |
 | `node_metrics` | Created via `create_hypertable('node_metrics', 'time')`. Stores per-node process stats (`mem_alloc_mb`, `mem_sys_mb`, `num_goroutine`, `uptime_secs`) referencing `nodes(id)`, with its own retention policy. |
 | `request_logs` | HTTP access log (`method`, `path`, `status_code`, `ip`, `duration_ms`, `created_at`), indexed on `created_at` for time-range queries. |
+
+## ClickHouse (optional: traffic analytics)
+
+The DN42 traffic-sampling analytics feature stores its high-write, columnar
+time-series in a **separate, optional ClickHouse database** rather than the
+TimescaleDB primary — keeping the analytical write load off the relational store.
+It is enabled only when `CLICKHOUSE_URL` is set (see
+[Configuration](./configuration.md)); when unset the feature is disabled
+end-to-end and ClickHouse is never contacted.
+
+ClickHouse does **not** use the `migrations/*.up.sql` framework. The schema is
+applied idempotently on startup via `CREATE TABLE IF NOT EXISTS`
+(`internal/clickhouse/schema.go`). Two `MergeTree` tables are created:
+
+| Table | Notable details |
+|---|---|
+| `traffic_samples` | One row per interface per sampling window: `time`, `node_id`, `peer_id`, `asn`, `sample_ratio`, scalar sampled/​v4/​v6 packet & byte counters, and `Map(String, UInt64)` columns `proto_pkts` / `proto_bytes` / `size_buckets` (merged at query time with `sumMap`). `PARTITION BY toYYYYMMDD(time)`, `ORDER BY (node_id, peer_id, time)`, `TTL time + INTERVAL 15 DAY`. |
+| `traffic_top` | One row per Top-N entry per interface per window: `time`, `node_id`, `peer_id`, `asn`, `kind` (0=src IP, 1=dst IP, 2=dst port), `label`, `pkts`, `bytes`. `ORDER BY (node_id, kind, time, label)`, `TTL time + INTERVAL 7 DAY`. |
+
+The agent only ever captures packet **headers** and reports aggregates and Top-N
+talkers — no payload is ever sent or stored. Top-N addresses are restricted to
+DN42 ranges.
 
 ## See also
 

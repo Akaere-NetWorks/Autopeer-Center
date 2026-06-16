@@ -269,6 +269,7 @@ Returns aggregate platform statistics for the admin dashboard.
   | `nodes_online` | integer | Number of online nodes. |
   | `nodes_total` | integer | Total number of nodes. |
   | `new_today` | integer | Peers created in the last 24h. |
+  | `traffic_analytics_enabled` | boolean | Whether the optional ClickHouse-backed traffic-analytics feature is configured (`CLICKHOUSE_URL` set). Frontends use this to decide whether to render the traffic panels and call the `.../traffic` endpoints. |
 
   ```json
   {
@@ -278,7 +279,8 @@ Returns aggregate platform statistics for the admin dashboard.
     "peers_rejected": 7,
     "nodes_online": 8,
     "nodes_total": 9,
-    "new_today": 3
+    "new_today": 3,
+    "traffic_analytics_enabled": false
   }
   ```
 
@@ -732,6 +734,97 @@ Exports all bot settings (with the auth token redacted) and the list of blocked 
   (Note: blocked-user lookup errors are ignored; only the settings-load error produces this response.)
 
 - **Source:** `AdminHandler.ExportBotSettings` — `internal/handler/admin_bot.go`
+
+---
+
+# Flap agents
+
+Admin management of the `flapalerted-agent` allowlist (the `flap_agents` table),
+the DB-backed replacement for the former `FLAP_AGENT_TOKENS` / `FLAP_AGENT_PUBKEYS`
+environment variables. A connecting agent authenticates with the bearer token
+issued here, then upgrades to an X25519-encrypted session (see
+[../websocket-protocol.md](../websocket-protocol.md) and [./flap.md](./flap.md)).
+All endpoints require a **Bearer JWT (admin)**.
+
+## `GET /api/v1/admin/flap/agents`
+
+Lists all configured flap agents with their live connection status.
+
+- **Auth:** Bearer JWT (admin)
+- **Request body:** None.
+- **Response `200`:** `{ "agents": [ ... ] }` where each agent has:
+
+  | Field | Type | Description |
+  |---|---|---|
+  | `id` | string (uuid) | Internal record id. |
+  | `agent_id` | string | Agent identity / hub key. |
+  | `name` / `description` | string | Admin-supplied labels. |
+  | `agent_pubkey` | string | TOFU-pinned X25519 public key (hex), or `""` until first connect. |
+  | `enabled` | bool | Whether the token is accepted. |
+  | `version` | string | Last advertised agent version. |
+  | `last_seen_at` | string\|null | RFC3339 timestamp of last register. |
+  | `online` | bool | Whether the agent is currently connected. |
+  | `has_pubkey` | bool | Convenience flag: `agent_pubkey != ""`. |
+
+- **Source:** `AdminFlapHandler.List` — `internal/handler/admin_flap.go`
+
+## `POST /api/v1/admin/flap/agents`
+
+Registers a new flap agent and returns its bearer token **once**.
+
+- **Auth:** Bearer JWT (admin)
+- **Request body:**
+
+  | Field | Type | Required | Description |
+  |---|---|---|---|
+  | `agent_id` | string | yes | Unique identity; must match the agent's config. |
+  | `name` | string | no | Display label. |
+  | `description` | string | no | Free-text notes. |
+
+- **Response `201`:** `{ "id", "agent_id", "token", "message" }` — `token` is shown only this once.
+- **Errors:** `400 bad_request` (missing `agent_id`), `409 conflict` (duplicate `agent_id`), `500 internal_error`.
+- **Source:** `AdminFlapHandler.Create` — `internal/handler/admin_flap.go`
+
+## `PUT /api/v1/admin/flap/agents/{id}`
+
+Updates the editable fields of a flap agent.
+
+- **Auth:** Bearer JWT (admin)
+- **Path parameters:** `id` — the flap agent record id.
+- **Request body:** any of `name` (string), `description` (string), `enabled` (bool); omitted fields are left unchanged.
+- **Response `200`:** the updated agent object.
+- **Errors:** `400 bad_request`, `404 not_found`, `500 internal_error`.
+- **Source:** `AdminFlapHandler.Update` — `internal/handler/admin_flap.go`
+
+## `POST /api/v1/admin/flap/agents/{id}/regenerate-token`
+
+Issues a new bearer token, invalidating the previous one.
+
+- **Auth:** Bearer JWT (admin)
+- **Path parameters:** `id` — the flap agent record id.
+- **Response `200`:** `{ "token", "message" }` — shown only this once.
+- **Errors:** `404 not_found`, `500 internal_error`.
+- **Source:** `AdminFlapHandler.RegenerateToken` — `internal/handler/admin_flap.go`
+
+## `POST /api/v1/admin/flap/agents/{id}/reset-pubkey`
+
+Clears the TOFU-pinned public key so the agent re-pins on its next connection (used when re-provisioning key material).
+
+- **Auth:** Bearer JWT (admin)
+- **Path parameters:** `id` — the flap agent record id.
+- **Response `200`:** `{ "status": "pubkey_cleared" }`.
+- **Errors:** `404 not_found`, `500 internal_error`.
+- **Source:** `AdminFlapHandler.ResetPubkey` — `internal/handler/admin_flap.go`
+
+## `DELETE /api/v1/admin/flap/agents/{id}`
+
+Removes a flap agent from the allowlist.
+
+- **Auth:** Bearer JWT (admin)
+- **Path parameters:** `id` — the flap agent record id.
+- **Response `200`:** `{ "status": "deleted" }`.
+- **Errors:** `404 not_found`, `500 internal_error`.
+- **Source:** `AdminFlapHandler.Delete` — `internal/handler/admin_flap.go`
 
 ---
 

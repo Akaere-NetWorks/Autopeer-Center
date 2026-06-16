@@ -181,6 +181,9 @@ func (ac *AgentConn) ReadPump(h *Hub) {
 		case TypeHeartbeat:
 			h.handleHeartbeat(ac.NodeID, data)
 
+		case TypeTrafficReport:
+			h.handleTrafficReport(ac.NodeID, data)
+
 		case TypePeersSync:
 			h.handlePeersSync(ac)
 

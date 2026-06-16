@@ -65,6 +65,7 @@ func TestRenderTextSubjects(t *testing.T) {
 		"peer-endpoint-mismatch":  "Endpoint Mismatch Detected – AS4242420000",
 		"peer-endpoint-recovered": "Endpoint Recovered – AS4242420000",
 		"test-email":              "Email test – 2026-06-07T00:00:00Z",
+		"peer-inactive-warning":   "Inactivity warning – AS4242420000",
 	}
 
 	vars := minimalVars()

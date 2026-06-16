@@ -878,6 +878,78 @@ Each `points` element:
 
 ---
 
+## `GET /api/v1/admin/peers/{id}/traffic`
+
+Return per-interface DN42 traffic-sampling analytics for one peer. **Optional
+feature:** only available when the center is configured with a ClickHouse backend
+(`CLICKHOUSE_URL`); otherwise returns `503 traffic_analytics_disabled`. Use the
+`traffic_analytics_enabled` flag from `GET /api/v1/admin/stats` to decide whether
+to call this. Only aggregate counts and Top-N talkers are returned — never packet
+payload.
+
+- **Auth:** Bearer JWT (admin)
+- **Path parameters:**
+
+  | Name | Type | Description |
+  |---|---|---|
+  | `id` | string | Peer ID. |
+
+- **Query parameters:**
+
+  | Name | Type | Default | Description |
+  |---|---|---|---|
+  | `hours` | integer | `24` | Look-back window in hours (clamped to `1..168`). |
+  | `top` | integer | `10` | Number of Top-N rows per table (clamped to `1..50`). |
+
+- **Request body:** None.
+- **Response `200`:**
+
+  | Field | Type | Description |
+  |---|---|---|
+  | `enabled` | boolean | Always `true` on a `200`. |
+  | `sample_ratio` | number | The most recent packet sampling ratio (use `1/sample_ratio` to estimate totals). |
+  | `points` | array | Time series. Each point: `time`, `sampled_bytes`, `sampled_packets`, `v4_bytes`, `v6_bytes`, and `proto_bytes` / `proto_pkts` / `size_buckets` objects (string→integer maps). |
+  | `top_src` | array | Top source DN42 IPs: `{ label, pkts, bytes }`. |
+  | `top_dst` | array | Top destination DN42 IPs: `{ label, pkts, bytes }`. |
+  | `top_ports` | array | Top destination ports: `{ label, pkts, bytes }` (`label` is the port number as text). |
+
+  Fixed `proto` keys: `tcp, udp, icmp, icmpv6, ospf, bgp, other`. Fixed
+  `size_buckets` keys: `0-63, 64-127, 128-255, 256-511, 512-1023, 1024-1499,
+  1500, 1501+`.
+
+  ```json
+  {
+    "enabled": true,
+    "sample_ratio": 0.001,
+    "points": [
+      {
+        "time": "2026-06-10T12:00:00Z",
+        "sampled_bytes": 31280,
+        "sampled_packets": 412,
+        "v4_bytes": 0,
+        "v6_bytes": 31280,
+        "proto_bytes": { "tcp": 22100, "bgp": 4200, "icmpv6": 980 },
+        "proto_pkts": { "tcp": 300, "bgp": 80, "icmpv6": 32 },
+        "size_buckets": { "64-127": 210, "128-255": 150, "1500": 52 }
+      }
+    ],
+    "top_src": [{ "label": "172.20.0.53", "pkts": 180, "bytes": 14200 }],
+    "top_dst": [{ "label": "fd00:1234::1", "pkts": 90, "bytes": 8800 }],
+    "top_ports": [{ "label": "179", "pkts": 80, "bytes": 4200 }]
+  }
+  ```
+
+- **Errors:**
+
+  | Status | `error` code | Condition |
+  |---|---|---|
+  | 503 | `traffic_analytics_disabled` | ClickHouse is not configured. |
+  | 500 | `internal_error` | Failed to fetch traffic analytics. |
+
+- **Source:** `TrafficHandler.PeerTraffic` — `internal/handler/traffic.go`
+
+---
+
 ## `POST /api/v1/admin/peers/{id}/approve`
 
 Approve a `pending` peer: sends `peer.add` to the node's agent and, on success, flips status to `active`.

@@ -7,11 +7,14 @@ import (
 	"strings"
 	"time"
 
+	chdriver "github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/akaere/autopeer-center/internal/cache"
+	"github.com/akaere/autopeer-center/internal/clickhouse"
 	"github.com/akaere/autopeer-center/internal/config"
 	"github.com/akaere/autopeer-center/internal/crypto"
 	"github.com/akaere/autopeer-center/internal/endpoint"
 	"github.com/akaere/autopeer-center/internal/handler"
+	"github.com/akaere/autopeer-center/internal/inactivity"
 	"github.com/akaere/autopeer-center/internal/latency"
 	"github.com/akaere/autopeer-center/internal/lock"
 	"github.com/akaere/autopeer-center/internal/middleware"
@@ -49,6 +52,7 @@ type AppDeps struct {
 	BotHandler          *handler.BotHandler
 	RegistryHandler     *handler.RegistryHandler
 	StatsHandler        *handler.StatsHandler
+	TrafficHandler      *handler.TrafficHandler
 	MCPKeyHandler       *handler.MCPKeyHandler
 	AdminMCPKeyHandler  *handler.AdminMCPKeyHandler
 	MCPHandler          *handler.MCPHandler
@@ -58,15 +62,19 @@ type AppDeps struct {
 	TelegramBindHandler *handler.TelegramBindingHandler
 	SystemStatusHandler *handler.SystemStatusHandler
 	QueueMonitorHandler *handler.QueueMonitorHandler
+	FlapHandler         *handler.FlapHandler
+	AdminFlapHandler    *handler.AdminFlapHandler
 
 	// Background services
 	Hub             *ws.Hub
+	FlapHub         *ws.FlapHub
 	Q               *queue.Queue
 	Inspector       *queue.Inspector
 	AuditSvc        *service.AuditService
 	Locker          lock.Locker
-	LatencyChecker  *latency.Checker
-	EndpointChecker *endpoint.Checker
+	LatencyChecker    *latency.Checker
+	EndpointChecker   *endpoint.Checker
+	InactivityWorker  *inactivity.Worker
 
 	// Shutdown hooks
 	StopMCPAudit      func()
@@ -84,6 +92,7 @@ func BuildDeps(
 	c *cache.Cache,
 	locker lock.Locker,
 	centerKP *crypto.KeyPair,
+	chConn chdriver.Conn,
 ) (*AppDeps, error) {
 	// ── Repositories ────────────────────────────────────────────────────────
 	adminRepo := repository.NewAdminRepository(bunDB)
@@ -106,9 +115,20 @@ func BuildDeps(
 	emailSvc := service.NewEmailService(cfg.EmailConfig())
 	auditSvc := service.NewAuditService(auditRepo)
 
+	// ── ClickHouse traffic store (optional) ──────────────────────────────────
+	// nil when CLICKHOUSE_URL is unset/unreachable; nil is the single "feature
+	// disabled" signal threaded through the hub, stats and traffic handlers.
+	var trafficStore *clickhouse.TrafficStore
+	if chConn != nil {
+		trafficStore = clickhouse.NewTrafficStore(chConn, func(ctx context.Context, nodeID string, asn int64) (string, error) {
+			return peerRepo.ResolvePeerIDByNodeAndASN(ctx, nodeID, asn)
+		})
+	}
+
 	// ── WebSocket hub ────────────────────────────────────────────────────────
 	hub := ws.NewHub(nodeRepo, peerRepo, metricsRepo, botRepo, botBindingRepo, auditRepo, statsRepo, c)
 	hub.SetLocker(locker)
+	hub.SetTrafficStore(trafficStore)
 	hub.LoadBotSettings()
 
 	trustedNets := middleware.ParseTrustedProxies(cfg.TrustedProxyCIDR)
@@ -125,6 +145,8 @@ func BuildDeps(
 	botHandler := handler.NewBotHandler(hub, cfg.CORSOrigin)
 	registryHandler := handler.NewRegistryHandler(registry, c, cfg, trustedNets)
 	statsHandler := handler.NewStatsHandler(repository.NewStatsRepository(bunDB))
+	statsHandler.SetTrafficEnabled(trafficStore != nil)
+	trafficHandler := handler.NewTrafficHandler(trafficStore)
 	mcpKeyHandler := handler.NewMCPKeyHandler(mcpRepo)
 	adminMCPKeyHandler := handler.NewAdminMCPKeyHandler(mcpRepo, auditSvc)
 	emailPrefHandler := handler.NewEmailPreferencesHandler(authRepo)
@@ -138,6 +160,16 @@ func BuildDeps(
 	}
 	passkeyHandler.SetAdminHandler(adminHandler)
 	telegramBindHandler := handler.NewTelegramBindingHandler(botBindingRepo, authRepo, cfg.TelegramBotUsername)
+
+	// ── Flap hub + handler ───────────────────────────────────────────────────
+	// flapalerted-agents hold their own state; center relays public requests to
+	// them via RPC. Identities live in the flap_agents table (admin-managed);
+	// auth mirrors the node agent (token bootstrap → X25519 key exchange).
+	flapAgentRepo := repository.NewFlapAgentRepository(bunDB)
+	flapRegistry := ws.NewDBFlapRegistry(flapAgentRepo)
+	flapHub := ws.NewFlapHub(flapRegistry, centerKP)
+	flapHandler := handler.NewFlapHandler(flapHub, flapRegistry, cfg.CORSOrigin)
+	adminFlapHandler := handler.NewAdminFlapHandler(flapAgentRepo, flapHub, auditSvc)
 
 	// ── Queue + MCP handlers ─────────────────────────────────────────────────
 	q := queue.New(cfg, cfg.RedisURL, redisClient != nil && redisClient.Available())
@@ -259,6 +291,25 @@ func BuildDeps(
 		hub.NotifyPeerBot(asn, notifKey, event, data)
 	})
 
+	// ── Inactivity worker ─────────────────────────────────────────────────────
+	inactivityWorker := inactivity.NewWorker(peerRepo, hub, auditSvc, locker, inactivity.Config{
+		Enabled:        cfg.InactivitySweepEnabled,
+		WarnFirstDays:  cfg.InactivityWarnFirstDays,
+		WarnSecondDays: cfg.InactivityWarnSecondDays,
+		DeleteDays:     cfg.InactivityDeleteDays,
+		DryRun:         cfg.InactivityDryRun,
+	})
+	inactivityWorker.SetEmailSender(func(to, template string, vars map[string]interface{}) {
+		emailSvc.SendRaw(to, template, vars)
+	})
+	inactivityWorker.SetBotBindingLookup(func(ctx context.Context, asn int64) (int64, bool) {
+		b, err := botBindingRepo.GetByASN(ctx, asn)
+		if err != nil || b == nil {
+			return 0, false
+		}
+		return b.TgUserID, true
+	})
+
 	// ── Queue handler registration ────────────────────────────────────────────
 	q.RegisterCleanupHandler(cleanupRepo, nodeRepo)
 	q.RegisterLatencyCheckHandler(
@@ -270,6 +321,7 @@ func BuildDeps(
 		},
 	)
 	q.RegisterEndpointCheckHandler(endpointChecker.CheckAll)
+	q.RegisterInactivityHandler(inactivityWorker.RunOnce)
 
 	return &AppDeps{
 		Cfg:         cfg,
@@ -291,6 +343,7 @@ func BuildDeps(
 		BotHandler:          botHandler,
 		RegistryHandler:     registryHandler,
 		StatsHandler:        statsHandler,
+		TrafficHandler:      trafficHandler,
 		MCPKeyHandler:       mcpKeyHandler,
 		AdminMCPKeyHandler:  adminMCPKeyHandler,
 		MCPHandler:          mcpHandler,
@@ -300,14 +353,18 @@ func BuildDeps(
 		TelegramBindHandler: telegramBindHandler,
 		SystemStatusHandler: systemStatusHandler,
 		QueueMonitorHandler: queueMonitorHandler,
+		FlapHandler:         flapHandler,
+		AdminFlapHandler:    adminFlapHandler,
 
 		Hub:             hub,
+		FlapHub:         flapHub,
 		Q:               q,
 		Inspector:       inspector,
 		AuditSvc:        auditSvc,
 		Locker:          locker,
-		LatencyChecker:  latencyChecker,
-		EndpointChecker: endpointChecker,
+		LatencyChecker:   latencyChecker,
+		EndpointChecker:  endpointChecker,
+		InactivityWorker: inactivityWorker,
 
 		StopMCPAudit:      stopMCPAudit,
 		StopAdminMCPAudit: stopAdminMCPAudit,

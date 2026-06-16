@@ -40,6 +40,19 @@ func Connect(ctx context.Context, databaseURL string) (*pgxpool.Pool, error) {
 	config.MaxConnLifetime = 30 * time.Minute
 	config.MaxConnIdleTime = 5 * time.Minute
 
+	// Bound how long any statement waits to acquire a lock. Without this, a
+	// SELECT ... FOR UPDATE (e.g. the atlas_credits row lock during measurement
+	// creation) blocks indefinitely behind a stuck/idle-in-transaction session,
+	// hanging the request instead of failing fast. Only caps lock waits, not
+	// query runtime, so long-running reads/migrations are unaffected. Respect an
+	// explicit lock_timeout already present in DATABASE_URL.
+	if config.ConnConfig.RuntimeParams == nil {
+		config.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	if _, ok := config.ConnConfig.RuntimeParams["lock_timeout"]; !ok {
+		config.ConnConfig.RuntimeParams["lock_timeout"] = "10000" // milliseconds
+	}
+
 	log.WithFields(logrus.Fields{
 		"max_conns":         20,
 		"min_conns":         2,
